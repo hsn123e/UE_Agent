@@ -1,0 +1,61 @@
+{
+  "tools": [
+    {
+      "name": "ue.rc.call",
+      "description": "Call an Unreal UFunction via Remote Control API: PUT http://127.0.0.1:<port>/remote/object/call",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "rcPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+          "objectPath": { "type": "string", "minLength": 1 },
+          "functionName": { "type": "string", "minLength": 1 },
+          "parameters": { "type": "object" }
+        },
+        "required": ["objectPath", "functionName"]
+      }
+    },
+    {
+      "name": "ue.rc.get_port",
+      "description": "Return the configured Remote Control port and how it was determined.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      }
+    },
+    {
+      "name": "ue.bridge.health",
+      "description": "Check UEAgentBridge plugin health endpoint.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+        }
+      }
+    },
+    {
+      "name": "ue.bridge.call_tool",
+      "description": "Call a UEAgentBridge tool (Unreal plugin HTTP bridge).",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "toolName": { "type": "string", "minLength": 1 },
+          "input": { "type": "object" }
+        },
+        "required": ["toolName"]
+      }
+    },
+    {
+      "name": "system.info",
+      "description": "Return runtime info for debugging.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      }
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.1.0",
+  "FriendlyName": "UE Agent Bridge",
+  "Description": "Local (localhost) bridge that exposes safe editor tools (JSON schema) for an external AI agent.",
+  "Category": "Editor",
+  "EnabledByDefault": false,
+  "CanContainContent": false,
+  "IsBetaVersion": true,
+  "Modules": [
+    {
+      "Name": "UEAgentBridge",
+      "Type": "Editor",
+      "LoadingPhase": "Default"
+    }
+  ]
+}
+
