@@ -5,8 +5,6 @@
 - إضافة داخل المحرر `UEAgentBridge` (واجهة دردشة + أدوات Editor/Blueprint/UMG).
 - (اختياري) خادم Node.js `agent-server` إذا أردت التحكم من خارج المحرر أو بناء “وكيل” أكثر تقدّمًا.
 
-> ملاحظة: هذا المشروع **مستوحى** من أسلوب “الأدوات/Tool calling” (مثل Aura)، لكنه ليس نسخة ولا يعتمد على كود Aura.
-
 ## المتطلبات
 
 - Unreal Engine 5.7.x (مجرّب على 5.7.2)
@@ -123,22 +121,5 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:30020/ue-agent/tools/call"
   - عندها يجب إرسال هيدر `Authorization: Bearer <token>`
 
 لا تفتح المنفذ على الشبكة ولا تشارك مفاتيح API.
-
-## رفع المشروع على GitHub
-
-1) أنشئ مستودع جديد على حسابك (مثال اسم: `UE_Agent`).
-2) من الجهاز:
-
-```powershell
-cd C:\UE_Agent
-git init
-git add .
-git commit -m "Initial commit"
-git branch -M main
-git remote add origin https://github.com/hsn123e/UE_Agent.git
-git push -u origin main
-```
-
-> قبل `git add .` تأكد أن مجلدات مثل `.analysis/` و `node_modules/` غير مضافة (موجود `.gitignore` لهذا الغرض).
 
 
