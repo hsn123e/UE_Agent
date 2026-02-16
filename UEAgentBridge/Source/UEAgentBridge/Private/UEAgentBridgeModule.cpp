@@ -34,6 +34,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/DateTime.h"
 #include "Misc/Paths.h"
+#include "UObject/UnrealType.h"
 
 #include "Async/Async.h"
 #include "EdGraph/EdGraph.h"
@@ -43,6 +44,10 @@
 #include "K2Node_CallFunction.h"
 #include "K2Node_CustomEvent.h"
 #include "K2Node_Event.h"
+#include "K2Node_ExecutionSequence.h"
+#include "K2Node_IfThenElse.h"
+#include "K2Node_VariableGet.h"
+#include "K2Node_VariableSet.h"
 
 #include "WidgetBlueprint.h"
 #include "WidgetBlueprintFactory.h"
@@ -60,6 +65,8 @@
 
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimationAsset.h"
+#include "Animation/Skeleton.h"
+#include "Engine/SkeletalMeshSocket.h"
 
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTree/BlackboardData.h"
@@ -183,16 +190,22 @@ static FString GetAgentSystemPrompt()
 		"- level.save_current, level.spawn_actor\n"
 		"- asset.search, asset.create_blueprint\n"
 		"- ai.create_behavior_tree, ai.create_blackboard\n"
+		"- skeleton.list_sockets, skeleton.add_socket\n"
 		"- blueprint.compile\n"
 		"- blueprint.get_graph_t3d, blueprint.paste_t3d\n"
 		"- blueprint.k2.list_graphs, blueprint.k2.list_nodes\n"
-		"- blueprint.k2.add_begin_play, blueprint.k2.add_call_function, blueprint.k2.connect_pins\n"
+		"- blueprint.k2.add_begin_play, blueprint.k2.add_event_tick\n"
+		"- blueprint.k2.add_call_function, blueprint.k2.add_branch, blueprint.k2.add_sequence\n"
+		"- blueprint.k2.add_variable_get, blueprint.k2.add_variable_set\n"
+		"- blueprint.k2.connect_pins, blueprint.k2.set_pin_default\n"
+		"- blueprint.set_cdo_property\n"
 		"- umg.create_widget_blueprint, umg.add_widget, umg.set_text, umg.set_properties, umg.scaffold_layout\n"
 		"- umg.bind_event, umg.bind_property, umg.unbind, umg.list_widgets, umg.compile\n"
 		"\n"
 		"Protocol:\n"
 		"- When the user asks you to DO something in the editor, you must keep working until it is done.\n"
 		"- Do NOT ask the user to confirm each step. Do NOT wait for the user between steps.\n"
+		"- If a tool call fails due to missing/invalid input, fix the inputs and retry automatically.\n"
 		"- Only ask a question if you are truly blocked and cannot safely proceed.\n"
 		"- Prefer tool calls over explanations. Save explanations for the very end.\n"
 		"- If you need a tool, respond with ONLY a single JSON object:\n"
@@ -355,12 +368,7 @@ public:
 
 	void SyncTranscriptFromConversation()
 	{
-		Transcript.Empty();
-		if (TranscriptBox.IsValid())
-		{
-			TranscriptBox->SetText(FText::GetEmpty());
-		}
-
+		FString NewTranscript;
 		if (FConversation* C = GetActiveConversation())
 		{
 			for (const FAgentMessage& M : C->Messages)
@@ -369,9 +377,10 @@ public:
 				{
 					continue;
 				}
+
 				if (M.Role == TEXT("assistant"))
 				{
-					AppendTranscript(TEXT("[assistant] ") + M.Content);
+					NewTranscript += TEXT("[assistant] ") + M.Content + TEXT("\n");
 					continue;
 				}
 
@@ -380,14 +389,15 @@ public:
 				FString Type;
 				if (TryParseJsonObject(M.Content, Obj) && Obj.IsValid() && Obj->TryGetStringField(TEXT("type"), Type) && Type.Equals(TEXT("tool_result"), ESearchCase::IgnoreCase))
 				{
-					// Show full tool_result payload for debugging and step-by-step visibility.
-					AppendTranscript(TEXT("[tool_result] ") + M.Content.Left(12000));
+					NewTranscript += TEXT("[tool_result] ") + M.Content.Left(12000) + TEXT("\n");
 					continue;
 				}
 
-				AppendTranscript(TEXT("[user] ") + M.Content);
+				NewTranscript += TEXT("[user] ") + M.Content + TEXT("\n");
 			}
 		}
+
+		SetTranscriptText(MoveTemp(NewTranscript), /*bScrollToEnd*/ true);
 	}
 
 	void LoadConversations()
@@ -1277,14 +1287,23 @@ public:
 		return FReply::Handled();
 	}
 
-	void AppendTranscript(const FString& Line)
+	void SetTranscriptText(FString NewText, bool bScrollToEnd)
 	{
-		Transcript += Line + TEXT("\n");
+		Transcript = MoveTemp(NewText);
 		if (TranscriptBox.IsValid())
 		{
 			TranscriptBox->SetText(FText::FromString(Transcript));
-			TranscriptBox->ScrollTo(ETextLocation::EndOfDocument);
+			if (bScrollToEnd)
+			{
+				TranscriptBox->ScrollTo(ETextLocation::EndOfDocument);
+			}
 		}
+	}
+
+	void AppendTranscript(const FString& Line)
+	{
+		Transcript += Line + TEXT("\n");
+		SetTranscriptText(Transcript, /*bScrollToEnd*/ true);
 	}
 
 	bool CanSend() const
@@ -1622,6 +1641,10 @@ public:
 		if (Code < 200 || Code >= 300)
 		{
 			AppendTranscript(FString::Printf(TEXT("[llm] http %d"), Code));
+			if (Code == 401)
+			{
+				AppendTranscript(TEXT("[llm] unauthorized: check API Key (or choose a local preset that doesn't require auth)"));
+			}
 			AppendTranscript(Resp->GetContentAsString().Left(4000));
 			bBusy = false;
 			return;
@@ -1654,7 +1677,6 @@ public:
 		if (!MsgObj.IsValid())
 		{
 			// Normal text response (no JSON tool protocol).
-			AppendTranscript(TEXT("[assistant] ") + Content.Left(8000));
 			Messages.Add({TEXT("assistant"), Content});
 			if (FConversation* C = GetActiveConversation())
 			{
@@ -1662,6 +1684,7 @@ public:
 				C->UpdatedAt = FDateTime::UtcNow();
 				RefreshConversationList();
 				SaveConversations();
+				SyncTranscriptFromConversation();
 			}
 
 			// If we are in an execution loop, keep going without requiring user input.
@@ -1683,7 +1706,6 @@ public:
 		{
 			FString Text;
 			MsgObj->TryGetStringField(TEXT("text"), Text);
-			AppendTranscript(TEXT("[assistant] ") + Text);
 			Messages.Add({TEXT("assistant"), Text});
 			if (FConversation* C = GetActiveConversation())
 			{
@@ -1691,6 +1713,7 @@ public:
 				C->UpdatedAt = FDateTime::UtcNow();
 				RefreshConversationList();
 				SaveConversations();
+				SyncTranscriptFromConversation();
 			}
 			bBusy = false;
 			return;
@@ -1714,7 +1737,6 @@ public:
 				return;
 			}
 
-			AppendTranscript(TEXT("[tool] ") + ToolName);
 			FToolExecResult ToolRes = ExecuteTool(ToolName, InputObj);
 
 			// Append tool_result as next user message
@@ -1747,13 +1769,13 @@ public:
 			FJsonSerializer::Serialize(ToolResultObj.ToSharedRef(), Writer);
 
 			Messages.Add({TEXT("user"), ToolResultStr});
-			AppendTranscript(TEXT("[tool_result] ") + ToolResultStr.Left(2000));
 			if (FConversation* C = GetActiveConversation())
 			{
 				C->Messages = Messages;
 				C->UpdatedAt = FDateTime::UtcNow();
 				RefreshConversationList();
 				SaveConversations();
+				SyncTranscriptFromConversation();
 			}
 
 			AgentStep();
@@ -1787,7 +1809,7 @@ private:
 
 		bBusy = true;
 		const int32 RequestedSteps = (MaxSteps <= 0) ? 200 : MaxSteps;
-		StepsRemaining = FMath::Clamp(RequestedSteps, 1, 200);
+		StepsRemaining = FMath::Clamp(RequestedSteps, 1, 500);
 
 		FConversation* C = GetActiveConversation();
 		if (!C)
@@ -1814,9 +1836,8 @@ private:
 		SaveConversations();
 
 		MaybeAutoTitleActiveConversation(Prompt);
-
-		AppendTranscript(TEXT("[user] ") + Prompt);
 		InputBox->SetText(FText::GetEmpty());
+		SyncTranscriptFromConversation();
 
 		AgentStep();
 	}
@@ -2591,6 +2612,278 @@ bool FUEAgentBridgeModule::HandleTools(const FHttpServerRequest& Request, const 
 
 	{
 		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("blueprint.k2.add_event_tick"));
+		Tool->SetStringField(TEXT("description"), TEXT("Add an Event Tick node to a Blueprint EventGraph."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto BpProp = MakeShared<FJsonObject>();
+		BpProp->SetStringField(TEXT("type"), TEXT("string"));
+		BpProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+
+		auto GraphNameProp = MakeShared<FJsonObject>();
+		GraphNameProp->SetStringField(TEXT("type"), TEXT("string"));
+		GraphNameProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("graphName"), GraphNameProp);
+
+		auto XProp = MakeShared<FJsonObject>(); XProp->SetStringField(TEXT("type"), TEXT("number"));
+		auto YProp = MakeShared<FJsonObject>(); YProp->SetStringField(TEXT("type"), TEXT("number"));
+		Props->SetObjectField(TEXT("x"), XProp);
+		Props->SetObjectField(TEXT("y"), YProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("graphName")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("blueprint.k2.add_branch"));
+		Tool->SetStringField(TEXT("description"), TEXT("Add a Branch (IfThenElse) node to a Blueprint graph."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto BpProp = MakeShared<FJsonObject>();
+		BpProp->SetStringField(TEXT("type"), TEXT("string"));
+		BpProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+
+		auto GraphNameProp = MakeShared<FJsonObject>();
+		GraphNameProp->SetStringField(TEXT("type"), TEXT("string"));
+		GraphNameProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("graphName"), GraphNameProp);
+
+		auto XProp = MakeShared<FJsonObject>(); XProp->SetStringField(TEXT("type"), TEXT("number"));
+		auto YProp = MakeShared<FJsonObject>(); YProp->SetStringField(TEXT("type"), TEXT("number"));
+		Props->SetObjectField(TEXT("x"), XProp);
+		Props->SetObjectField(TEXT("y"), YProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("graphName")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("blueprint.k2.add_sequence"));
+		Tool->SetStringField(TEXT("description"), TEXT("Add a Sequence node to a Blueprint graph."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto BpProp = MakeShared<FJsonObject>();
+		BpProp->SetStringField(TEXT("type"), TEXT("string"));
+		BpProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+
+		auto GraphNameProp = MakeShared<FJsonObject>();
+		GraphNameProp->SetStringField(TEXT("type"), TEXT("string"));
+		GraphNameProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("graphName"), GraphNameProp);
+
+		auto ThenPinsProp = MakeShared<FJsonObject>();
+		ThenPinsProp->SetStringField(TEXT("type"), TEXT("number"));
+		Props->SetObjectField(TEXT("thenPins"), ThenPinsProp);
+
+		auto XProp = MakeShared<FJsonObject>(); XProp->SetStringField(TEXT("type"), TEXT("number"));
+		auto YProp = MakeShared<FJsonObject>(); YProp->SetStringField(TEXT("type"), TEXT("number"));
+		Props->SetObjectField(TEXT("x"), XProp);
+		Props->SetObjectField(TEXT("y"), YProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("graphName")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("blueprint.k2.add_variable_get"));
+		Tool->SetStringField(TEXT("description"), TEXT("Add a Get variable node for a Blueprint member variable."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto BpProp = MakeShared<FJsonObject>();
+		BpProp->SetStringField(TEXT("type"), TEXT("string"));
+		BpProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+
+		auto GraphNameProp = MakeShared<FJsonObject>();
+		GraphNameProp->SetStringField(TEXT("type"), TEXT("string"));
+		GraphNameProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("graphName"), GraphNameProp);
+
+		auto VarProp = MakeShared<FJsonObject>();
+		VarProp->SetStringField(TEXT("type"), TEXT("string"));
+		VarProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("variableName"), VarProp);
+
+		auto XProp = MakeShared<FJsonObject>(); XProp->SetStringField(TEXT("type"), TEXT("number"));
+		auto YProp = MakeShared<FJsonObject>(); YProp->SetStringField(TEXT("type"), TEXT("number"));
+		Props->SetObjectField(TEXT("x"), XProp);
+		Props->SetObjectField(TEXT("y"), YProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("graphName")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("variableName")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("blueprint.k2.add_variable_set"));
+		Tool->SetStringField(TEXT("description"), TEXT("Add a Set variable node for a Blueprint member variable."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto BpProp = MakeShared<FJsonObject>();
+		BpProp->SetStringField(TEXT("type"), TEXT("string"));
+		BpProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+
+		auto GraphNameProp = MakeShared<FJsonObject>();
+		GraphNameProp->SetStringField(TEXT("type"), TEXT("string"));
+		GraphNameProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("graphName"), GraphNameProp);
+
+		auto VarProp = MakeShared<FJsonObject>();
+		VarProp->SetStringField(TEXT("type"), TEXT("string"));
+		VarProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("variableName"), VarProp);
+
+		auto XProp = MakeShared<FJsonObject>(); XProp->SetStringField(TEXT("type"), TEXT("number"));
+		auto YProp = MakeShared<FJsonObject>(); YProp->SetStringField(TEXT("type"), TEXT("number"));
+		Props->SetObjectField(TEXT("x"), XProp);
+		Props->SetObjectField(TEXT("y"), YProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("graphName")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("variableName")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("blueprint.k2.set_pin_default"));
+		Tool->SetStringField(TEXT("description"), TEXT("Set a pin's default value (or default object path) by node GUID + pin name."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto BpProp = MakeShared<FJsonObject>();
+		BpProp->SetStringField(TEXT("type"), TEXT("string"));
+		BpProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+
+		auto GraphNameProp = MakeShared<FJsonObject>();
+		GraphNameProp->SetStringField(TEXT("type"), TEXT("string"));
+		GraphNameProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("graphName"), GraphNameProp);
+
+		auto NodeProp = MakeShared<FJsonObject>();
+		NodeProp->SetStringField(TEXT("type"), TEXT("string"));
+		NodeProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("nodeGuid"), NodeProp);
+
+		auto PinProp = MakeShared<FJsonObject>();
+		PinProp->SetStringField(TEXT("type"), TEXT("string"));
+		PinProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("pin"), PinProp);
+
+		auto ValueProp = MakeShared<FJsonObject>();
+		ValueProp->SetStringField(TEXT("type"), TEXT("string"));
+		Props->SetObjectField(TEXT("value"), ValueProp);
+
+		auto AsObjProp = MakeShared<FJsonObject>();
+		AsObjProp->SetStringField(TEXT("type"), TEXT("boolean"));
+		Props->SetObjectField(TEXT("asObjectPath"), AsObjProp);
+
+		auto CompileProp = MakeShared<FJsonObject>();
+		CompileProp->SetStringField(TEXT("type"), TEXT("boolean"));
+		Props->SetObjectField(TEXT("compile"), CompileProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("graphName")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("nodeGuid")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("pin")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("value")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("blueprint.set_cdo_property"));
+		Tool->SetStringField(TEXT("description"), TEXT("Set a Blueprint class default object (CDO) property by name. Supports bool/number/string/objectPath."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto BpProp = MakeShared<FJsonObject>();
+		BpProp->SetStringField(TEXT("type"), TEXT("string"));
+		BpProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+
+		auto PropName = MakeShared<FJsonObject>();
+		PropName->SetStringField(TEXT("type"), TEXT("string"));
+		PropName->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("propertyName"), PropName);
+
+		auto ValueType = MakeShared<FJsonObject>();
+		ValueType->SetStringField(TEXT("type"), TEXT("string"));
+		Props->SetObjectField(TEXT("valueType"), ValueType);
+
+		auto ValueStr = MakeShared<FJsonObject>();
+		ValueStr->SetStringField(TEXT("type"), TEXT("string"));
+		Props->SetObjectField(TEXT("value"), ValueStr);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("propertyName")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("valueType")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("value")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
 		Tool->SetStringField(TEXT("name"), TEXT("ai.create_behavior_tree"));
 		Tool->SetStringField(TEXT("description"), TEXT("Create a BehaviorTree asset at /Game/..."));
 		auto Schema = MakeShared<FJsonObject>();
@@ -2628,6 +2921,88 @@ bool FUEAgentBridgeModule::HandleTools(const FHttpServerRequest& Request, const 
 		Schema->SetObjectField(TEXT("properties"), Props);
 		TArray<TSharedPtr<FJsonValue>> ReqArr;
 		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("assetPath")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("skeleton.list_sockets"));
+		Tool->SetStringField(TEXT("description"), TEXT("List sockets on a USkeleton asset."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto SkelProp = MakeShared<FJsonObject>();
+		SkelProp->SetStringField(TEXT("type"), TEXT("string"));
+		SkelProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("skeletonPath"), SkelProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("skeletonPath")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("skeleton.add_socket"));
+		Tool->SetStringField(TEXT("description"), TEXT("Add a socket to a USkeleton asset."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto SkelProp = MakeShared<FJsonObject>();
+		SkelProp->SetStringField(TEXT("type"), TEXT("string"));
+		SkelProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("skeletonPath"), SkelProp);
+
+		auto SocketNameProp = MakeShared<FJsonObject>();
+		SocketNameProp->SetStringField(TEXT("type"), TEXT("string"));
+		SocketNameProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("socketName"), SocketNameProp);
+
+		auto BoneNameProp = MakeShared<FJsonObject>();
+		BoneNameProp->SetStringField(TEXT("type"), TEXT("string"));
+		BoneNameProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("boneName"), BoneNameProp);
+
+		auto XProp = MakeShared<FJsonObject>(); XProp->SetStringField(TEXT("type"), TEXT("number"));
+		auto YProp = MakeShared<FJsonObject>(); YProp->SetStringField(TEXT("type"), TEXT("number"));
+		auto ZProp = MakeShared<FJsonObject>(); ZProp->SetStringField(TEXT("type"), TEXT("number"));
+		auto PitchProp = MakeShared<FJsonObject>(); PitchProp->SetStringField(TEXT("type"), TEXT("number"));
+		auto YawProp = MakeShared<FJsonObject>(); YawProp->SetStringField(TEXT("type"), TEXT("number"));
+		auto RollProp = MakeShared<FJsonObject>(); RollProp->SetStringField(TEXT("type"), TEXT("number"));
+		auto SXProp = MakeShared<FJsonObject>(); SXProp->SetStringField(TEXT("type"), TEXT("number"));
+		auto SYProp = MakeShared<FJsonObject>(); SYProp->SetStringField(TEXT("type"), TEXT("number"));
+		auto SZProp = MakeShared<FJsonObject>(); SZProp->SetStringField(TEXT("type"), TEXT("number"));
+
+		auto TransformProp = MakeShared<FJsonObject>();
+		TransformProp->SetStringField(TEXT("type"), TEXT("object"));
+		TransformProp->SetBoolField(TEXT("additionalProperties"), false);
+		auto TransformProps = MakeShared<FJsonObject>();
+		TransformProps->SetObjectField(TEXT("x"), XProp);
+		TransformProps->SetObjectField(TEXT("y"), YProp);
+		TransformProps->SetObjectField(TEXT("z"), ZProp);
+		TransformProps->SetObjectField(TEXT("pitch"), PitchProp);
+		TransformProps->SetObjectField(TEXT("yaw"), YawProp);
+		TransformProps->SetObjectField(TEXT("roll"), RollProp);
+		TransformProps->SetObjectField(TEXT("sx"), SXProp);
+		TransformProps->SetObjectField(TEXT("sy"), SYProp);
+		TransformProps->SetObjectField(TEXT("sz"), SZProp);
+		TransformProp->SetObjectField(TEXT("properties"), TransformProps);
+		Props->SetObjectField(TEXT("transform"), TransformProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("skeletonPath")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("socketName")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("boneName")));
 		Schema->SetArrayField(TEXT("required"), ReqArr);
 		Tool->SetObjectField(TEXT("inputSchema"), Schema);
 		Tools.Add(MakeShared<FJsonValueObject>(Tool));
@@ -3239,14 +3614,23 @@ bool FUEAgentBridgeModule::ExecuteToolForUI(const FString& ToolName, const TShar
 	else if (ToolKey == TEXT("asset.create_blueprint")) { HandleTool_AssetCreateBlueprint(Input, Cb); }
 	else if (ToolKey == TEXT("ai.create_behavior_tree")) { HandleTool_AICreateBehaviorTree(Input, Cb); }
 	else if (ToolKey == TEXT("ai.create_blackboard")) { HandleTool_AICreateBlackboard(Input, Cb); }
+	else if (ToolKey == TEXT("skeleton.list_sockets")) { HandleTool_SkeletonListSockets(Input, Cb); }
+	else if (ToolKey == TEXT("skeleton.add_socket")) { HandleTool_SkeletonAddSocket(Input, Cb); }
+	else if (ToolKey == TEXT("blueprint.set_cdo_property")) { HandleTool_BlueprintSetCDOProperty(Input, Cb); }
 	else if (ToolKey == TEXT("blueprint.compile")) { HandleTool_BlueprintCompile(Input, Cb); }
 	else if (ToolKey == TEXT("blueprint.get_graph_t3d")) { HandleTool_BlueprintGetGraphT3D(Input, Cb); }
 	else if (ToolKey == TEXT("blueprint.paste_t3d")) { HandleTool_BlueprintPasteT3D(Input, Cb); }
 	else if (ToolKey == TEXT("blueprint.k2.list_graphs")) { HandleTool_BlueprintK2ListGraphs(Input, Cb); }
 	else if (ToolKey == TEXT("blueprint.k2.list_nodes")) { HandleTool_BlueprintK2ListNodes(Input, Cb); }
 	else if (ToolKey == TEXT("blueprint.k2.add_begin_play")) { HandleTool_BlueprintK2AddBeginPlay(Input, Cb); }
+	else if (ToolKey == TEXT("blueprint.k2.add_event_tick")) { HandleTool_BlueprintK2AddEventTick(Input, Cb); }
 	else if (ToolKey == TEXT("blueprint.k2.add_call_function")) { HandleTool_BlueprintK2AddCallFunction(Input, Cb); }
+	else if (ToolKey == TEXT("blueprint.k2.add_branch")) { HandleTool_BlueprintK2AddBranch(Input, Cb); }
+	else if (ToolKey == TEXT("blueprint.k2.add_sequence")) { HandleTool_BlueprintK2AddSequence(Input, Cb); }
+	else if (ToolKey == TEXT("blueprint.k2.add_variable_get")) { HandleTool_BlueprintK2AddVariableGet(Input, Cb); }
+	else if (ToolKey == TEXT("blueprint.k2.add_variable_set")) { HandleTool_BlueprintK2AddVariableSet(Input, Cb); }
 	else if (ToolKey == TEXT("blueprint.k2.connect_pins")) { HandleTool_BlueprintK2ConnectPins(Input, Cb); }
+	else if (ToolKey == TEXT("blueprint.k2.set_pin_default")) { HandleTool_BlueprintK2SetPinDefault(Input, Cb); }
 	else if (ToolKey == TEXT("umg.create_widget_blueprint")) { HandleTool_UmgCreateWidgetBlueprint(Input, Cb); }
 	else if (ToolKey == TEXT("umg.add_widget")) { HandleTool_UmgAddWidget(Input, Cb); }
 	else if (ToolKey == TEXT("umg.set_text")) { HandleTool_UmgSetText(Input, Cb); }
@@ -3339,14 +3723,23 @@ bool FUEAgentBridgeModule::HandleToolCall(const FHttpServerRequest& Request, con
 		if (ToolKey == TEXT("asset.create_blueprint")) { HandleTool_AssetCreateBlueprint(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("ai.create_behavior_tree")) { HandleTool_AICreateBehaviorTree(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("ai.create_blackboard")) { HandleTool_AICreateBlackboard(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("skeleton.list_sockets")) { HandleTool_SkeletonListSockets(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("skeleton.add_socket")) { HandleTool_SkeletonAddSocket(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("blueprint.set_cdo_property")) { HandleTool_BlueprintSetCDOProperty(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("blueprint.compile")) { HandleTool_BlueprintCompile(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("blueprint.get_graph_t3d")) { HandleTool_BlueprintGetGraphT3D(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("blueprint.paste_t3d")) { HandleTool_BlueprintPasteT3D(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("blueprint.k2.list_graphs")) { HandleTool_BlueprintK2ListGraphs(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("blueprint.k2.list_nodes")) { HandleTool_BlueprintK2ListNodes(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("blueprint.k2.add_begin_play")) { HandleTool_BlueprintK2AddBeginPlay(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("blueprint.k2.add_event_tick")) { HandleTool_BlueprintK2AddEventTick(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("blueprint.k2.add_call_function")) { HandleTool_BlueprintK2AddCallFunction(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("blueprint.k2.add_branch")) { HandleTool_BlueprintK2AddBranch(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("blueprint.k2.add_sequence")) { HandleTool_BlueprintK2AddSequence(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("blueprint.k2.add_variable_get")) { HandleTool_BlueprintK2AddVariableGet(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("blueprint.k2.add_variable_set")) { HandleTool_BlueprintK2AddVariableSet(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("blueprint.k2.connect_pins")) { HandleTool_BlueprintK2ConnectPins(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("blueprint.k2.set_pin_default")) { HandleTool_BlueprintK2SetPinDefault(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("umg.create_widget_blueprint")) { HandleTool_UmgCreateWidgetBlueprint(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("umg.add_widget")) { HandleTool_UmgAddWidget(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("umg.set_text")) { HandleTool_UmgSetText(InputObj, OnComplete); return; }
@@ -4284,6 +4677,76 @@ bool FUEAgentBridgeModule::HandleTool_BlueprintK2AddBeginPlay(const TSharedPtr<F
 	return true;
 }
 
+bool FUEAgentBridgeModule::HandleTool_BlueprintK2AddEventTick(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString BlueprintPath;
+	FString GraphName;
+	if (!Input->TryGetStringField(TEXT("blueprintPath"), BlueprintPath) || BlueprintPath.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("graphName"), GraphName) || GraphName.IsEmpty())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing blueprintPath or graphName"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UBlueprint* BP = LoadBlueprintByPath(BlueprintPath);
+	if (!BP)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load blueprint"));
+		Out->SetStringField(TEXT("blueprintPath"), BlueprintPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UEdGraph* Graph = FindBlueprintGraph(BP, GraphName);
+	if (!Graph)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Graph not found"));
+		Out->SetStringField(TEXT("graphName"), GraphName);
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	double X = 0, Y = 0;
+	Input->TryGetNumberField(TEXT("x"), X);
+	Input->TryGetNumberField(TEXT("y"), Y);
+
+	BP->Modify();
+	Graph->Modify();
+
+	FGraphNodeCreator<UK2Node_Event> Creator(*Graph);
+	UK2Node_Event* Node = Creator.CreateNode();
+	Node->NodePosX = (int32)X;
+	Node->NodePosY = (int32)Y;
+	Node->EventReference.SetExternalMember(FName(TEXT("ReceiveTick")), AActor::StaticClass());
+	Node->bOverrideFunction = true;
+	Node->AllocateDefaultPins();
+	Creator.Finalize();
+
+	FKismetEditorUtilities::CompileBlueprint(BP);
+	if (UPackage* Package = BP->GetOutermost())
+	{
+		Package->MarkPackageDirty();
+	}
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetStringField(TEXT("result"), Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
 bool FUEAgentBridgeModule::HandleTool_BlueprintK2AddCallFunction(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
 {
 	auto Out = MakeShared<FJsonObject>();
@@ -4372,6 +4835,312 @@ bool FUEAgentBridgeModule::HandleTool_BlueprintK2AddCallFunction(const TSharedPt
 	Node->NodePosX = (int32)X;
 	Node->NodePosY = (int32)Y;
 	Node->SetFromFunction(Func);
+	Node->AllocateDefaultPins();
+	Creator.Finalize();
+
+	FKismetEditorUtilities::CompileBlueprint(BP);
+	if (UPackage* Package = BP->GetOutermost())
+	{
+		Package->MarkPackageDirty();
+	}
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetStringField(TEXT("result"), Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
+bool FUEAgentBridgeModule::HandleTool_BlueprintK2AddBranch(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString BlueprintPath;
+	FString GraphName;
+	if (!Input->TryGetStringField(TEXT("blueprintPath"), BlueprintPath) || BlueprintPath.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("graphName"), GraphName) || GraphName.IsEmpty())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing blueprintPath or graphName"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UBlueprint* BP = LoadBlueprintByPath(BlueprintPath);
+	if (!BP)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load blueprint"));
+		Out->SetStringField(TEXT("blueprintPath"), BlueprintPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UEdGraph* Graph = FindBlueprintGraph(BP, GraphName);
+	if (!Graph)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Graph not found"));
+		Out->SetStringField(TEXT("graphName"), GraphName);
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	double X = 0, Y = 0;
+	Input->TryGetNumberField(TEXT("x"), X);
+	Input->TryGetNumberField(TEXT("y"), Y);
+
+	BP->Modify();
+	Graph->Modify();
+
+	FGraphNodeCreator<UK2Node_IfThenElse> Creator(*Graph);
+	UK2Node_IfThenElse* Node = Creator.CreateNode();
+	Node->NodePosX = (int32)X;
+	Node->NodePosY = (int32)Y;
+	Node->AllocateDefaultPins();
+	Creator.Finalize();
+
+	FKismetEditorUtilities::CompileBlueprint(BP);
+	if (UPackage* Package = BP->GetOutermost())
+	{
+		Package->MarkPackageDirty();
+	}
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetStringField(TEXT("result"), Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
+bool FUEAgentBridgeModule::HandleTool_BlueprintK2AddSequence(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString BlueprintPath;
+	FString GraphName;
+	if (!Input->TryGetStringField(TEXT("blueprintPath"), BlueprintPath) || BlueprintPath.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("graphName"), GraphName) || GraphName.IsEmpty())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing blueprintPath or graphName"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UBlueprint* BP = LoadBlueprintByPath(BlueprintPath);
+	if (!BP)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load blueprint"));
+		Out->SetStringField(TEXT("blueprintPath"), BlueprintPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UEdGraph* Graph = FindBlueprintGraph(BP, GraphName);
+	if (!Graph)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Graph not found"));
+		Out->SetStringField(TEXT("graphName"), GraphName);
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	double X = 0, Y = 0;
+	Input->TryGetNumberField(TEXT("x"), X);
+	Input->TryGetNumberField(TEXT("y"), Y);
+
+	double ThenPinsNum = 2;
+	Input->TryGetNumberField(TEXT("thenPins"), ThenPinsNum);
+	const int32 ThenPins = FMath::Clamp((int32)ThenPinsNum, 2, 10);
+
+	BP->Modify();
+	Graph->Modify();
+
+	FGraphNodeCreator<UK2Node_ExecutionSequence> Creator(*Graph);
+	UK2Node_ExecutionSequence* Node = Creator.CreateNode();
+	Node->NodePosX = (int32)X;
+	Node->NodePosY = (int32)Y;
+	Node->AllocateDefaultPins();
+	for (int32 i = 2; i < ThenPins; i++)
+	{
+		Node->AddInputPin();
+	}
+	Creator.Finalize();
+
+	FKismetEditorUtilities::CompileBlueprint(BP);
+	if (UPackage* Package = BP->GetOutermost())
+	{
+		Package->MarkPackageDirty();
+	}
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetStringField(TEXT("result"), Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
+bool FUEAgentBridgeModule::HandleTool_BlueprintK2AddVariableGet(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString BlueprintPath;
+	FString GraphName;
+	FString VariableName;
+	if (!Input->TryGetStringField(TEXT("blueprintPath"), BlueprintPath) || BlueprintPath.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("graphName"), GraphName) || GraphName.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("variableName"), VariableName) || VariableName.IsEmpty())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing blueprintPath, graphName, or variableName"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UBlueprint* BP = LoadBlueprintByPath(BlueprintPath);
+	if (!BP)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load blueprint"));
+		Out->SetStringField(TEXT("blueprintPath"), BlueprintPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UEdGraph* Graph = FindBlueprintGraph(BP, GraphName);
+	if (!Graph)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Graph not found"));
+		Out->SetStringField(TEXT("graphName"), GraphName);
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	const FName VarName(*VariableName);
+	if (FBlueprintEditorUtils::FindNewVariableIndex(BP, VarName) == INDEX_NONE)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Variable not found"));
+		Out->SetStringField(TEXT("variableName"), VariableName);
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	double X = 0, Y = 0;
+	Input->TryGetNumberField(TEXT("x"), X);
+	Input->TryGetNumberField(TEXT("y"), Y);
+
+	BP->Modify();
+	Graph->Modify();
+
+	FGraphNodeCreator<UK2Node_VariableGet> Creator(*Graph);
+	UK2Node_VariableGet* Node = Creator.CreateNode();
+	Node->NodePosX = (int32)X;
+	Node->NodePosY = (int32)Y;
+	Node->VariableReference.SetSelfMember(VarName);
+	Node->AllocateDefaultPins();
+	Creator.Finalize();
+
+	FKismetEditorUtilities::CompileBlueprint(BP);
+	if (UPackage* Package = BP->GetOutermost())
+	{
+		Package->MarkPackageDirty();
+	}
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetStringField(TEXT("result"), Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
+bool FUEAgentBridgeModule::HandleTool_BlueprintK2AddVariableSet(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString BlueprintPath;
+	FString GraphName;
+	FString VariableName;
+	if (!Input->TryGetStringField(TEXT("blueprintPath"), BlueprintPath) || BlueprintPath.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("graphName"), GraphName) || GraphName.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("variableName"), VariableName) || VariableName.IsEmpty())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing blueprintPath, graphName, or variableName"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UBlueprint* BP = LoadBlueprintByPath(BlueprintPath);
+	if (!BP)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load blueprint"));
+		Out->SetStringField(TEXT("blueprintPath"), BlueprintPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UEdGraph* Graph = FindBlueprintGraph(BP, GraphName);
+	if (!Graph)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Graph not found"));
+		Out->SetStringField(TEXT("graphName"), GraphName);
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	const FName VarName(*VariableName);
+	if (FBlueprintEditorUtils::FindNewVariableIndex(BP, VarName) == INDEX_NONE)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Variable not found"));
+		Out->SetStringField(TEXT("variableName"), VariableName);
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	double X = 0, Y = 0;
+	Input->TryGetNumberField(TEXT("x"), X);
+	Input->TryGetNumberField(TEXT("y"), Y);
+
+	BP->Modify();
+	Graph->Modify();
+
+	FGraphNodeCreator<UK2Node_VariableSet> Creator(*Graph);
+	UK2Node_VariableSet* Node = Creator.CreateNode();
+	Node->NodePosX = (int32)X;
+	Node->NodePosY = (int32)Y;
+	Node->VariableReference.SetSelfMember(VarName);
 	Node->AllocateDefaultPins();
 	Creator.Finalize();
 
@@ -4498,6 +5267,296 @@ bool FUEAgentBridgeModule::HandleTool_BlueprintK2ConnectPins(const TSharedPtr<FJ
 	return true;
 }
 
+bool FUEAgentBridgeModule::HandleTool_BlueprintK2SetPinDefault(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString BlueprintPath;
+	FString GraphName;
+	FString NodeGuidStr;
+	FString PinName;
+	FString Value;
+	if (!Input->TryGetStringField(TEXT("blueprintPath"), BlueprintPath) || BlueprintPath.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("graphName"), GraphName) || GraphName.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("nodeGuid"), NodeGuidStr) || NodeGuidStr.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("pin"), PinName) || PinName.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("value"), Value))
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing required fields"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FGuid NodeGuid;
+	if (!FGuid::Parse(NodeGuidStr, NodeGuid))
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Invalid GUID"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UBlueprint* BP = LoadBlueprintByPath(BlueprintPath);
+	if (!BP)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load blueprint"));
+		Out->SetStringField(TEXT("blueprintPath"), BlueprintPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UEdGraph* Graph = FindBlueprintGraph(BP, GraphName);
+	if (!Graph)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Graph not found"));
+		Out->SetStringField(TEXT("graphName"), GraphName);
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	UEdGraphNode* Node = FindNodeByGuid(Graph, NodeGuid);
+	if (!Node)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Node not found"));
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	UEdGraphPin* Pin = FindPinByName(Node, PinName);
+	if (!Pin)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Pin not found"));
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	bool bAsObjectPath = false;
+	Input->TryGetBoolField(TEXT("asObjectPath"), bAsObjectPath);
+
+	BP->Modify();
+	Graph->Modify();
+	Node->Modify();
+	Pin->Modify();
+
+	if (bAsObjectPath || Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Object || Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_SoftObject ||
+		Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Class || Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_SoftClass)
+	{
+		UObject* Obj = StaticLoadObject(UObject::StaticClass(), nullptr, *Value);
+		Pin->DefaultObject = Obj;
+		Pin->DefaultValue.Empty();
+	}
+	else
+	{
+		const UEdGraphSchema* Schema = Graph->GetSchema();
+		if (Schema)
+		{
+			Schema->TrySetDefaultValue(*Pin, Value);
+		}
+		else
+		{
+			Pin->DefaultValue = Value;
+		}
+		Pin->DefaultObject = nullptr;
+	}
+
+	bool bCompile = true;
+	Input->TryGetBoolField(TEXT("compile"), bCompile);
+	if (bCompile)
+	{
+		FKismetEditorUtilities::CompileBlueprint(BP);
+	}
+	if (UPackage* Package = BP->GetOutermost())
+	{
+		Package->MarkPackageDirty();
+	}
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetStringField(TEXT("result"), TEXT("updated"));
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
+bool FUEAgentBridgeModule::HandleTool_BlueprintSetCDOProperty(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString BlueprintPath;
+	FString PropertyName;
+	FString ValueType;
+	FString Value;
+	if (!Input->TryGetStringField(TEXT("blueprintPath"), BlueprintPath) || BlueprintPath.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("propertyName"), PropertyName) || PropertyName.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("valueType"), ValueType) || ValueType.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("value"), Value))
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing required fields"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UBlueprint* BP = LoadBlueprintByPath(BlueprintPath);
+	if (!BP)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load blueprint"));
+		Out->SetStringField(TEXT("blueprintPath"), BlueprintPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	if (!BP->GeneratedClass)
+	{
+		FKismetEditorUtilities::CompileBlueprint(BP);
+	}
+	UClass* Cls = BP->GeneratedClass;
+	if (!Cls)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Blueprint has no GeneratedClass"));
+		OnComplete(JsonResponse(Out, 500));
+		return true;
+	}
+
+	UObject* CDO = Cls->GetDefaultObject();
+	if (!CDO)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to get CDO"));
+		OnComplete(JsonResponse(Out, 500));
+		return true;
+	}
+
+	FProperty* Prop = FindFProperty<FProperty>(Cls, *PropertyName);
+	if (!Prop)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Property not found"));
+		Out->SetStringField(TEXT("propertyName"), PropertyName);
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	BP->Modify();
+	CDO->Modify();
+
+	const FString Type = ValueType.ToLower();
+	void* Addr = Prop->ContainerPtrToValuePtr<void>(CDO);
+	bool bSetOk = true;
+
+	if (Type == TEXT("bool"))
+	{
+		if (FBoolProperty* BoolProp = CastField<FBoolProperty>(Prop))
+		{
+			BoolProp->SetPropertyValue(Addr, Value.Equals(TEXT("true"), ESearchCase::IgnoreCase) || Value == TEXT("1"));
+		}
+		else
+		{
+			bSetOk = false;
+		}
+	}
+	else if (Type == TEXT("number"))
+	{
+		if (FNumericProperty* NumProp = CastField<FNumericProperty>(Prop))
+		{
+			if (NumProp->IsInteger())
+			{
+				int64 I = FCString::Atoi64(*Value);
+				NumProp->SetIntPropertyValue(Addr, I);
+			}
+			else
+			{
+				double D = FCString::Atod(*Value);
+				NumProp->SetFloatingPointPropertyValue(Addr, D);
+			}
+		}
+		else
+		{
+			bSetOk = false;
+		}
+	}
+	else if (Type == TEXT("string"))
+	{
+		if (FStrProperty* StrProp = CastField<FStrProperty>(Prop))
+		{
+			StrProp->SetPropertyValue(Addr, Value);
+		}
+		else if (FNameProperty* NameProp = CastField<FNameProperty>(Prop))
+		{
+			NameProp->SetPropertyValue(Addr, FName(*Value));
+		}
+		else if (FTextProperty* TextProp = CastField<FTextProperty>(Prop))
+		{
+			TextProp->SetPropertyValue(Addr, FText::FromString(Value));
+		}
+		else
+		{
+			bSetOk = false;
+		}
+	}
+	else if (Type == TEXT("objectpath"))
+	{
+		UObject* Obj = StaticLoadObject(UObject::StaticClass(), nullptr, *Value);
+		if (FObjectProperty* ObjProp = CastField<FObjectProperty>(Prop))
+		{
+			ObjProp->SetObjectPropertyValue(Addr, Obj);
+		}
+		else if (FSoftObjectProperty* SoftObjProp = CastField<FSoftObjectProperty>(Prop))
+		{
+			const FSoftObjectPath Path(Value);
+			SoftObjProp->SetPropertyValue(Addr, FSoftObjectPtr(Path));
+		}
+		else
+		{
+			bSetOk = false;
+		}
+	}
+	else
+	{
+		bSetOk = false;
+	}
+
+	if (!bSetOk)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Unsupported property/valueType combination"));
+		Out->SetStringField(TEXT("propertyName"), PropertyName);
+		Out->SetStringField(TEXT("valueType"), ValueType);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
+	if (UPackage* Package = BP->GetOutermost())
+	{
+		Package->MarkPackageDirty();
+	}
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetStringField(TEXT("result"), TEXT("updated"));
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
 static UObject* CreateAssetWithFactory(const FString& AssetPath, UClass* AssetClass, UFactory* Factory, FString& OutError)
 {
 	if (AssetPath.IsEmpty())
@@ -4609,6 +5668,159 @@ bool FUEAgentBridgeModule::HandleTool_AICreateBlackboard(const TSharedPtr<FJsonO
 
 	Out->SetBoolField(TEXT("ok"), true);
 	Out->SetStringField(TEXT("result"), Asset->GetPathName());
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
+bool FUEAgentBridgeModule::HandleTool_SkeletonListSockets(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString SkeletonPath;
+	if (!Input->TryGetStringField(TEXT("skeletonPath"), SkeletonPath) || SkeletonPath.IsEmpty())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing skeletonPath"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	USkeleton* Skel = LoadObject<USkeleton>(nullptr, *SkeletonPath);
+	if (!Skel)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load skeleton"));
+		Out->SetStringField(TEXT("skeletonPath"), SkeletonPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Items;
+	for (const USkeletalMeshSocket* Socket : Skel->Sockets)
+	{
+		if (!Socket)
+		{
+			continue;
+		}
+
+		auto Obj = MakeShared<FJsonObject>();
+		Obj->SetStringField(TEXT("socketName"), Socket->SocketName.ToString());
+		Obj->SetStringField(TEXT("boneName"), Socket->BoneName.ToString());
+		Obj->SetNumberField(TEXT("x"), Socket->RelativeLocation.X);
+		Obj->SetNumberField(TEXT("y"), Socket->RelativeLocation.Y);
+		Obj->SetNumberField(TEXT("z"), Socket->RelativeLocation.Z);
+		Obj->SetNumberField(TEXT("pitch"), Socket->RelativeRotation.Pitch);
+		Obj->SetNumberField(TEXT("yaw"), Socket->RelativeRotation.Yaw);
+		Obj->SetNumberField(TEXT("roll"), Socket->RelativeRotation.Roll);
+		Obj->SetNumberField(TEXT("sx"), Socket->RelativeScale.X);
+		Obj->SetNumberField(TEXT("sy"), Socket->RelativeScale.Y);
+		Obj->SetNumberField(TEXT("sz"), Socket->RelativeScale.Z);
+		Items.Add(MakeShared<FJsonValueObject>(Obj));
+	}
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetArrayField(TEXT("result"), Items);
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
+bool FUEAgentBridgeModule::HandleTool_SkeletonAddSocket(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString SkeletonPath;
+	FString SocketName;
+	FString BoneName;
+	if (!Input->TryGetStringField(TEXT("skeletonPath"), SkeletonPath) || SkeletonPath.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("socketName"), SocketName) || SocketName.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("boneName"), BoneName) || BoneName.IsEmpty())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing skeletonPath, socketName, or boneName"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	USkeleton* Skel = LoadObject<USkeleton>(nullptr, *SkeletonPath);
+	if (!Skel)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load skeleton"));
+		Out->SetStringField(TEXT("skeletonPath"), SkeletonPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	// Optional transform
+	FVector Loc = FVector::ZeroVector;
+	FRotator Rot = FRotator::ZeroRotator;
+	FVector Scale = FVector(1, 1, 1);
+
+	const TSharedPtr<FJsonObject>* TransformObjPtr = nullptr;
+	if (Input->TryGetObjectField(TEXT("transform"), TransformObjPtr) && TransformObjPtr && (*TransformObjPtr).IsValid())
+	{
+		const TSharedPtr<FJsonObject> T = *TransformObjPtr;
+		double X = 0, Y = 0, Z = 0, Pitch = 0, Yaw = 0, Roll = 0, SX = 1, SY = 1, SZ = 1;
+		T->TryGetNumberField(TEXT("x"), X);
+		T->TryGetNumberField(TEXT("y"), Y);
+		T->TryGetNumberField(TEXT("z"), Z);
+		T->TryGetNumberField(TEXT("pitch"), Pitch);
+		T->TryGetNumberField(TEXT("yaw"), Yaw);
+		T->TryGetNumberField(TEXT("roll"), Roll);
+		T->TryGetNumberField(TEXT("sx"), SX);
+		T->TryGetNumberField(TEXT("sy"), SY);
+		T->TryGetNumberField(TEXT("sz"), SZ);
+		Loc = FVector((float)X, (float)Y, (float)Z);
+		Rot = FRotator((float)Pitch, (float)Yaw, (float)Roll);
+		Scale = FVector((float)SX, (float)SY, (float)SZ);
+	}
+
+	Skel->Modify();
+	USkeletalMeshSocket* Existing = nullptr;
+	for (USkeletalMeshSocket* S : Skel->Sockets)
+	{
+		if (S && S->SocketName.ToString().Equals(SocketName, ESearchCase::IgnoreCase))
+		{
+			Existing = S;
+			break;
+		}
+	}
+
+	USkeletalMeshSocket* Socket = Existing ? Existing : NewObject<USkeletalMeshSocket>(Skel);
+	Socket->SocketName = FName(*SocketName);
+	Socket->BoneName = FName(*BoneName);
+	Socket->RelativeLocation = Loc;
+	Socket->RelativeRotation = Rot;
+	Socket->RelativeScale = Scale;
+
+	if (!Existing)
+	{
+		Skel->Sockets.Add(Socket);
+	}
+
+	Skel->MarkPackageDirty();
+	if (UPackage* Package = Skel->GetOutermost())
+	{
+		Package->MarkPackageDirty();
+	}
+	Skel->PostEditChange();
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetStringField(TEXT("result"), TEXT("updated"));
 	OnComplete(JsonResponse(Out, 200));
 	return true;
 }

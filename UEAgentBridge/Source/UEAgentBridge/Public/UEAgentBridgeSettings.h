@@ -32,8 +32,8 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "LLM")
 	FString Model = TEXT("gpt-4o-mini");
 
-	UPROPERTY(config, EditAnywhere, Category = "LLM", meta = (ClampMin = "1", ClampMax = "30"))
-	int32 MaxSteps = 8;
+	UPROPERTY(config, EditAnywhere, Category = "LLM", meta = (ClampMin = "1", ClampMax = "500"))
+	int32 MaxSteps = 200;
 
 	UPROPERTY(config, EditAnywhere, Category = "LLM", meta = (ClampMin = "0.0", ClampMax = "2.0"))
 	float Temperature = 0.0f;
