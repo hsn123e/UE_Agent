@@ -314,11 +314,8 @@ public:
 				FString Type;
 				if (TryParseJsonObject(M.Content, Obj) && Obj.IsValid() && Obj->TryGetStringField(TEXT("type"), Type) && Type.Equals(TEXT("tool_result"), ESearchCase::IgnoreCase))
 				{
-					FString ToolName;
-					Obj->TryGetStringField(TEXT("toolName"), ToolName);
-					double Status = 0;
-					Obj->TryGetNumberField(TEXT("statusCode"), Status);
-					AppendTranscript(FString::Printf(TEXT("[tool_result] %s (http %d)"), *ToolName, (int32)Status));
+					// Show full tool_result payload for debugging and step-by-step visibility.
+					AppendTranscript(TEXT("[tool_result] ") + M.Content.Left(12000));
 					continue;
 				}
 
@@ -1160,6 +1157,16 @@ public:
 							.OnTextCommitted(this, &SUEAgentBridgePanel::OnModelCommitted)
 						]
 
+						+ SVerticalBox::Slot().AutoHeight().Padding(0, 10)
+						[
+							SNew(STextBlock).Text(FText::FromString(TEXT("Max steps (1-200)")))
+						]
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							SAssignNew(MaxStepsBox, SEditableTextBox)
+							.Text(FText::AsNumber(MaxSteps))
+						]
+
 						+ SVerticalBox::Slot().AutoHeight().Padding(0, 12)
 						[
 							SNew(SSeparator)
@@ -1315,6 +1322,13 @@ public:
 		if (ModelBox.IsValid())
 		{
 			Model = ModelBox->GetText().ToString();
+		}
+		if (MaxStepsBox.IsValid())
+		{
+			const FString S = MaxStepsBox->GetText().ToString().TrimStartAndEnd();
+			MaxSteps = FCString::Atoi(*S);
+			MaxSteps = FMath::Clamp(MaxSteps, 1, 200);
+			MaxStepsBox->SetText(FText::AsNumber(MaxSteps));
 		}
 		Settings->Provider = Provider;
 		Settings->BaseUrl = BaseUrl;
@@ -1687,7 +1701,8 @@ private:
 		}
 
 		bBusy = true;
-		StepsRemaining = FMath::Clamp(MaxSteps, 1, 30);
+		const int32 RequestedSteps = (MaxSteps <= 0) ? 200 : MaxSteps;
+		StepsRemaining = FMath::Clamp(RequestedSteps, 1, 200);
 
 		FConversation* C = GetActiveConversation();
 		if (!C)
@@ -1744,6 +1759,7 @@ private:
 	TSharedPtr<SEditableTextBox> BaseUrlBox;
 	TSharedPtr<SEditableTextBox> ApiKeyBox;
 	TSharedPtr<SEditableTextBox> ModelBox;
+	TSharedPtr<SEditableTextBox> MaxStepsBox;
 	TSharedPtr<SWidgetSwitcher> RightSwitcher;
 
 	TArray<FProviderPreset> ProviderPresets;
