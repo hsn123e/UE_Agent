@@ -65,6 +65,8 @@
 
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimationAsset.h"
+#include "Animation/AnimBlueprint.h"
+#include "Animation/AnimSequence.h"
 #include "Animation/Skeleton.h"
 #include "Engine/SkeletalMeshSocket.h"
 
@@ -198,6 +200,7 @@ static FString GetAgentSystemPrompt()
 		"- level.save_current, level.spawn_actor\n"
 		"- asset.search, asset.create_blueprint\n"
 		"- ai.create_behavior_tree, ai.create_blackboard, ai.setup_wander_for_selected_actor\n"
+		"- anim.setup_locomotion_for_selected_actor\n"
 		"- skeleton.list_sockets, skeleton.add_socket\n"
 		"- blueprint.compile\n"
 		"- blueprint.get_graph_t3d, blueprint.paste_t3d\n"
@@ -1707,6 +1710,22 @@ public:
 
 			Schema->SetObjectField(TEXT("properties"), Props);
 			OutTools.Add(MakeTool(TEXT("ai.setup_wander_for_selected_actor"), TEXT("Create a simple wander AI setup (BB/BT/AIController) under /Game/... and apply it to the selected Character immediately."), Schema));
+		}
+
+		{
+			auto Schema = EmptyObjSchema();
+			auto Props = MakeShared<FJsonObject>();
+
+			auto PackageProp = MakeShared<FJsonObject>();
+			PackageProp->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("packagePath"), PackageProp);
+
+			auto PreferProp = MakeShared<FJsonObject>();
+			PreferProp->SetStringField(TEXT("type"), TEXT("boolean"));
+			Props->SetObjectField(TEXT("preferExistingAnimBP"), PreferProp);
+
+			Schema->SetObjectField(TEXT("properties"), Props);
+			OutTools.Add(MakeTool(TEXT("anim.setup_locomotion_for_selected_actor"), TEXT("Auto-assign locomotion animation: prefer an existing AnimBP for the selected Character's skeleton, otherwise pick a best-match idle/walk animation asset."), Schema));
 		}
 
 		{
@@ -3559,6 +3578,28 @@ bool FUEAgentBridgeModule::HandleTools(const FHttpServerRequest& Request, const 
 
 	{
 		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("anim.setup_locomotion_for_selected_actor"));
+		Tool->SetStringField(TEXT("description"), TEXT("Auto-assign locomotion animation: prefer an existing AnimBP for the selected Character's skeleton, otherwise pick a best-match idle/walk animation asset."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto PackageProp = MakeShared<FJsonObject>();
+		PackageProp->SetStringField(TEXT("type"), TEXT("string"));
+		Props->SetObjectField(TEXT("packagePath"), PackageProp);
+
+		auto PreferProp = MakeShared<FJsonObject>();
+		PreferProp->SetStringField(TEXT("type"), TEXT("boolean"));
+		Props->SetObjectField(TEXT("preferExistingAnimBP"), PreferProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
 		Tool->SetStringField(TEXT("name"), TEXT("skeleton.list_sockets"));
 		Tool->SetStringField(TEXT("description"), TEXT("List sockets on a USkeleton asset."));
 		auto Schema = MakeShared<FJsonObject>();
@@ -4246,6 +4287,7 @@ bool FUEAgentBridgeModule::ExecuteToolForUI(const FString& ToolName, const TShar
 	else if (ToolKey == TEXT("ai.create_behavior_tree")) { HandleTool_AICreateBehaviorTree(Input, Cb); }
 	else if (ToolKey == TEXT("ai.create_blackboard")) { HandleTool_AICreateBlackboard(Input, Cb); }
 	else if (ToolKey == TEXT("ai.setup_wander_for_selected_actor")) { HandleTool_AISetupWanderForSelectedActor(Input, Cb); }
+	else if (ToolKey == TEXT("anim.setup_locomotion_for_selected_actor")) { HandleTool_AnimSetupLocomotionForSelectedActor(Input, Cb); }
 	else if (ToolKey == TEXT("skeleton.list_sockets")) { HandleTool_SkeletonListSockets(Input, Cb); }
 	else if (ToolKey == TEXT("skeleton.add_socket")) { HandleTool_SkeletonAddSocket(Input, Cb); }
 	else if (ToolKey == TEXT("blueprint.set_cdo_property")) { HandleTool_BlueprintSetCDOProperty(Input, Cb); }
@@ -4356,6 +4398,7 @@ bool FUEAgentBridgeModule::HandleToolCall(const FHttpServerRequest& Request, con
 		if (ToolKey == TEXT("ai.create_behavior_tree")) { HandleTool_AICreateBehaviorTree(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("ai.create_blackboard")) { HandleTool_AICreateBlackboard(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("ai.setup_wander_for_selected_actor")) { HandleTool_AISetupWanderForSelectedActor(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("anim.setup_locomotion_for_selected_actor")) { HandleTool_AnimSetupLocomotionForSelectedActor(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("skeleton.list_sockets")) { HandleTool_SkeletonListSockets(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("skeleton.add_socket")) { HandleTool_SkeletonAddSocket(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("blueprint.set_cdo_property")) { HandleTool_BlueprintSetCDOProperty(InputObj, OnComplete); return; }
@@ -6689,6 +6732,205 @@ bool FUEAgentBridgeModule::HandleTool_AISetupWanderForSelectedActor(const TShare
 	}
 
 	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
+static int32 ScoreNameForKeywords(const FString& NameLower, const TArray<FString>& Keywords)
+{
+	int32 Score = 0;
+	for (const FString& K : Keywords)
+	{
+		if (!K.IsEmpty() && NameLower.Contains(K))
+		{
+			Score += 10;
+		}
+	}
+	return Score;
+}
+
+bool FUEAgentBridgeModule::HandleTool_AnimSetupLocomotionForSelectedActor(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+
+	FString PackagePath = TEXT("/Game");
+	bool bPreferExistingAnimBP = true;
+	if (Input.IsValid())
+	{
+		Input->TryGetStringField(TEXT("packagePath"), PackagePath);
+		Input->TryGetBoolField(TEXT("preferExistingAnimBP"), bPreferExistingAnimBP);
+	}
+	if (PackagePath.IsEmpty())
+	{
+		PackagePath = TEXT("/Game");
+	}
+	if (!PackagePath.StartsWith(TEXT("/")))
+	{
+		PackagePath = TEXT("/") + PackagePath;
+	}
+
+	// Selected actor
+	AActor* Actor = nullptr;
+	USkeletalMeshComponent* SkelComp = nullptr;
+	USkeleton* Skeleton = nullptr;
+
+	if (GEditor)
+	{
+		USelection* Sel = GEditor->GetSelectedActors();
+		if (Sel && Sel->Num() == 1)
+		{
+			for (FSelectionIterator It(*Sel); It; ++It)
+			{
+				Actor = Cast<AActor>(*It);
+				break;
+			}
+		}
+	}
+
+	if (!Actor)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Select exactly one Character/Actor with a SkeletalMeshComponent."));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	SkelComp = Actor->FindComponentByClass<USkeletalMeshComponent>();
+	if (!SkelComp || !SkelComp->GetSkeletalMeshAsset() || !SkelComp->GetSkeletalMeshAsset()->GetSkeleton())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Selected actor has no SkeletalMesh/Skeleton."));
+		Out->SetStringField(TEXT("actor"), Actor->GetName());
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	Skeleton = SkelComp->GetSkeletalMeshAsset()->GetSkeleton();
+	const FString SkeletonPath = Skeleton->GetPathName();
+
+	Out->SetStringField(TEXT("selectedActor"), Actor->GetName());
+	Out->SetStringField(TEXT("skeleton"), SkeletonPath);
+	Out->SetStringField(TEXT("packagePath"), PackagePath);
+
+	// 1) Prefer existing AnimBlueprint targeting this skeleton
+	if (bPreferExistingAnimBP)
+	{
+		IAssetRegistry& AR = FAssetRegistryModule::GetRegistry();
+		FARFilter Filter;
+		Filter.bRecursivePaths = true;
+		Filter.PackagePaths.Add(FName(*PackagePath));
+		Filter.ClassPaths.Add(UAnimBlueprint::StaticClass()->GetClassPathName());
+
+		TArray<FAssetData> Assets;
+		AR.GetAssets(Filter, Assets);
+
+		UAnimBlueprint* BestABP = nullptr;
+		int32 BestScore = -1;
+		for (const FAssetData& A : Assets)
+		{
+			UAnimBlueprint* ABP = Cast<UAnimBlueprint>(A.GetAsset());
+			if (!ABP || ABP->TargetSkeleton != Skeleton)
+			{
+				continue;
+			}
+
+			const FString N = A.AssetName.ToString().ToLower();
+			int32 Score = 0;
+			Score += ScoreNameForKeywords(N, { TEXT("abp"), TEXT("animbp"), TEXT("anim"), TEXT("locomotion"), TEXT("movement") });
+			if (Score > BestScore)
+			{
+				BestScore = Score;
+				BestABP = ABP;
+			}
+		}
+
+		if (BestABP && BestABP->GeneratedClass)
+		{
+			const FString AnimBPClassPath = BestABP->GeneratedClass->GetPathName();
+			TSharedPtr<FJsonObject> ApplyIn = MakeShared<FJsonObject>();
+			ApplyIn->SetStringField(TEXT("animBlueprintClassPath"), AnimBPClassPath);
+
+			TUniquePtr<FHttpServerResponse> Captured;
+			FHttpResultCallback Cb = [&Captured](TUniquePtr<FHttpServerResponse>&& Resp) { Captured = MoveTemp(Resp); };
+			HandleTool_EditorSetSelectedSkeletalAnimation(ApplyIn, Cb);
+
+			Out->SetBoolField(TEXT("ok"), true);
+			Out->SetStringField(TEXT("applied"), TEXT("animBlueprintClassPath"));
+			Out->SetStringField(TEXT("value"), AnimBPClassPath);
+			OnComplete(JsonResponse(Out, 200));
+			return true;
+		}
+	}
+
+	// 2) Fallback: find best-matching idle/walk anim sequences for this skeleton (apply one as single-node loop)
+	{
+		IAssetRegistry& AR = FAssetRegistryModule::GetRegistry();
+		FARFilter Filter;
+		Filter.bRecursivePaths = true;
+		Filter.PackagePaths.Add(FName(*PackagePath));
+		Filter.ClassPaths.Add(UAnimSequence::StaticClass()->GetClassPathName());
+
+		TArray<FAssetData> Assets;
+		AR.GetAssets(Filter, Assets);
+
+		UAnimSequence* BestIdle = nullptr;
+		int32 BestIdleScore = -1;
+		UAnimSequence* BestWalk = nullptr;
+		int32 BestWalkScore = -1;
+
+		for (const FAssetData& A : Assets)
+		{
+			UAnimSequence* Seq = Cast<UAnimSequence>(A.GetAsset());
+			if (!Seq || Seq->GetSkeleton() != Skeleton)
+			{
+				continue;
+			}
+
+			const FString N = A.AssetName.ToString().ToLower();
+			const int32 IdleScore = ScoreNameForKeywords(N, { TEXT("idle"), TEXT("stand"), TEXT("rest") });
+			const int32 WalkScore = ScoreNameForKeywords(N, { TEXT("walk"), TEXT("move") });
+			const int32 RunScore = ScoreNameForKeywords(N, { TEXT("run"), TEXT("sprint") });
+
+			// Prefer most "idle-ish" for idle, most "walk/run-ish" for walk.
+			if (IdleScore > BestIdleScore)
+			{
+				BestIdleScore = IdleScore;
+				BestIdle = Seq;
+			}
+
+			const int32 MoveScore = FMath::Max(WalkScore, RunScore);
+			if (MoveScore > BestWalkScore)
+			{
+				BestWalkScore = MoveScore;
+				BestWalk = Seq;
+			}
+		}
+
+		UAnimSequence* Chosen = BestIdle ? BestIdle : BestWalk;
+		if (Chosen)
+		{
+			const FString AnimPath = Chosen->GetPathName();
+			TSharedPtr<FJsonObject> ApplyIn = MakeShared<FJsonObject>();
+			ApplyIn->SetStringField(TEXT("animationAssetPath"), AnimPath);
+
+			TUniquePtr<FHttpServerResponse> Captured;
+			FHttpResultCallback Cb = [&Captured](TUniquePtr<FHttpServerResponse>&& Resp) { Captured = MoveTemp(Resp); };
+			HandleTool_EditorSetSelectedSkeletalAnimation(ApplyIn, Cb);
+
+			Out->SetBoolField(TEXT("ok"), true);
+			Out->SetStringField(TEXT("applied"), TEXT("animationAssetPath"));
+			Out->SetStringField(TEXT("value"), AnimPath);
+			if (!BestIdle)
+			{
+				Out->SetStringField(TEXT("warning"), TEXT("No matching AnimBlueprint found; applied a single looping animation asset. For full locomotion, add/choose an AnimBP for this skeleton."));
+			}
+			OnComplete(JsonResponse(Out, 200));
+			return true;
+		}
+	}
+
+	Out->SetBoolField(TEXT("ok"), false);
+	Out->SetStringField(TEXT("error"), TEXT("No compatible AnimBlueprint or AnimSequence found under packagePath for the selected skeleton."));
+	OnComplete(JsonResponse(Out, 404));
 	return true;
 }
 
