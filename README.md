@@ -85,9 +85,10 @@
 
 ### معلومات التواصل
 
+- برمجة
 - الاسم: حسن الحو
 - الموقع: سوريا — دمشق
-- الشعار: X555
+- X555
 - ديسكورد: `X555#5266`
 
 ---
@@ -164,9 +165,10 @@ This is a C++ editor plugin. Unreal must compile it at least once to match your 
 
 ### Contact
 
+- Programming
 - Name: Hassan Al-Hou
 - Location: Damascus, Syria
-- Brand: X555
+- X555
 - Discord: `X555#5266`
 
 
