@@ -1,125 +1,118 @@
-﻿# UE Agent (Aura-inspired) — Unreal Engine Editor Assistant
+﻿# UEAgentBridge — Unreal Engine Editor AI Assistant
 
-مشروع يساعدك على التحكم بمحرر Unreal Engine عبر:
+## العربية
 
-- إضافة داخل المحرر `UEAgentBridge` (واجهة دردشة + أدوات Editor/Blueprint/UMG).
-- (اختياري) خادم Node.js `agent-server` إذا أردت التحكم من خارج المحرر أو بناء “وكيل” أكثر تقدّمًا.
+`UEAgentBridge` هي إضافة (Plugin) داخل محرر Unreal Engine توفر:
 
-## المتطلبات
+- تبويب `Window → UE Agent` (دردشة + محادثات محفوظة + إعدادات).
+- أدوات Editor/Blueprint/UMG يمكن للـ LLM استخدامها.
+- HTTP Bridge محلي على `localhost` (اختياري) لاستدعاء الأدوات من خارج المحرر.
 
-- Unreal Engine 5.7.x (مجرّب على 5.7.2)
+### المتطلبات
+
+- Unreal Engine 5.7.x (تم الاختبار على 5.7.2)
 - Windows 10/11
-- لبناء إضافة C++:
-  - Visual Studio Build Tools 2022 + C++ toolchain + Windows 10 SDK
-  - .NET 8 (عادةً يأتي مع UE/UBT، لكن تأكد أنه مثبت)
+- لبناء إضافة C++: Visual Studio Build Tools 2022 + Windows 10 SDK
 
-## التثبيت (داخل مشروع Unreal)
+### التثبيت داخل مشروعك
 
-1) انسخ الإضافة إلى مشروعك:
+انسخ:
 
 `ue-agent/unreal/UEAgentBridge` → `<YourProject>/Plugins/UEAgentBridge`
 
-مثال عندك:
+ثم افتح المشروع وفعّل الإضافة من:
 
-`C:\UE_Agent\ue-agent\unreal\UEAgentBridge` → `C:\Unreal Projects\X555\Plugins\UEAgentBridge`
+`Edit → Plugins → UEAgentBridge`
 
-2) افتح المشروع في Unreal.
-- فعّل الإضافة: `Edit → Plugins → UEAgentBridge`
-- أعد تشغيل المحرر إذا طُلب ذلك.
+### التشغيل
 
-3) إذا ظهرت رسالة Compile:
-- أغلق المحرر
-- ابنِ المشروع/الإضافة (انظر قسم “إعادة البناء”)
-
-## التشغيل (واجهة داخل المحرر)
-
-من داخل Unreal Editor:
+داخل المحرر:
 
 `Window → UE Agent`
 
-ستجد:
-- قائمة محادثات (New / Delete) مع حفظ تلقائي.
-- منطقة محادثة + مربع إدخال:
-  - `Enter` يرسل
-  - `Shift+Enter` سطر جديد
-- زر `Settings` لتهيئة المزوّد (Provider) والموديل والمفتاح.
+### الإعدادات (LLM)
 
-### إعداد مزوّد LLM
+داخل صفحة `Settings`:
 
-داخل نافذة `Settings`:
+- اختر `Provider preset`
+- أدخل `API Key` (إذا كان مطلوبًا)
+- اختر `Model` (أو اضغط `Refresh` لجلب قائمة الموديلات)
+- اضغط `Save`
 
-**1) OpenAI-compatible**
-- `Base URL`: رابط API الذي يدعم `/chat/completions`
-- `API Key`: مفتاح المزود
-- `Model`: اسم الموديل
+**Ollama (Local)**
+- اختر preset: `Ollama (Local)`
+- لا تحتاج API Key
+- اضغط `Refresh` ثم اختر موديل من القائمة
 
-**2) Ollama Cloud**
-- `Base URL`: `https://ollama.com/api`
-- `API Key`: من `ollama.com/settings/keys`
-- `Model`: يجب أن يكون من قائمة الموديلات المتاحة لحسابك عبر Cloud API
+**Ollama Cloud**
+- اختر preset: `Ollama Cloud`
+- ضع API Key من `ollama.com/settings/keys`
+- اضغط `Refresh` واختر موديل
 
-لجلب أسماء الموديلات المتاحة (PowerShell):
+### حفظ المحادثات
 
-```powershell
-$k = "PUT_YOUR_OLLAMA_CLOUD_KEY_HERE"
-(Invoke-RestMethod -Uri "https://ollama.com/api/tags" -Headers @{ Authorization = "Bearer $k" }).models |
-  Select-Object -ExpandProperty name
-```
-
-**Ollama محلي (اختياري)**
-- شغّل Ollama محليًا
-- `Base URL`: `http://localhost:11434/api`
-- `API Key`: اتركها فارغة
-- `Model`: اسم موديل موجود محليًا (مثلاً من `GET /api/tags`)
-
-## حفظ المحادثات
-
-المحادثات محفوظة لكل مشروع داخل:
+يتم الحفظ لكل مشروع في:
 
 `<Project>/Saved/UEAgentBridge/conversations.json`
 
-مثال:
+### إعادة البناء (Build)
 
-`C:\Unreal Projects\X555\Saved\UEAgentBridge\conversations.json`
-
-يمكنك حذف محادثات من الواجهة (زر Delete).
-
-## أدوات UEAgentBridge (مختصر)
-
-الإضافة تفتح HTTP endpoints على `localhost` بالإضافة لأدوات داخلية تستدعي نفس handlers.
-
-Endpoints:
-- `GET /ue-agent/health`
-- `GET /ue-agent/tools`
-- `POST /ue-agent/tools/call`
-
-مثال استدعاء أداة عبر PowerShell:
-
-```powershell
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:30020/ue-agent/tools/call" `
-  -ContentType "application/json" `
-  -Body '{"toolName":"project.get_name","input":{}}'
-```
-
-## إعادة البناء (Build)
-
-مهم: Unreal Editor يقفل DLL، لذلك:
-
-1) أغلق Unreal Editor بالكامل.
-2) ابنِ المشروع:
+أغلق Unreal Editor ثم:
 
 ```powershell
 & "C:\Unreal Engine\UE_5.7\Engine\Build\BatchFiles\Build.bat" UnrealEditor Win64 Development `
   -Project="C:\Unreal Projects\X555\X555.uproject" -WaitMutex -NoHotReload
 ```
 
-## الأمان
+### الأمان
 
-- الإضافة مصممة للاستخدام المحلي فقط (`localhost`).
-- يمكن (اختياري) وضع Token عبر:
-  - `UE_AGENT_BRIDGE_TOKEN`
-  - عندها يجب إرسال هيدر `Authorization: Bearer <token>`
+الجسر مصمم للاستخدام المحلي فقط (`localhost`). لا تفتحه على الشبكة ولا تشارك مفاتيح API.
 
-لا تفتح المنفذ على الشبكة ولا تشارك مفاتيح API.
+---
+
+## English
+
+`UEAgentBridge` is an Unreal Editor plugin that provides:
+
+- `Window → UE Agent` tab (chat + persistent conversations + settings).
+- Editor/Blueprint/UMG tools the LLM can call.
+- Optional local HTTP bridge on `localhost` to call tools from outside the editor.
+
+### Requirements
+
+- Unreal Engine 5.7.x (tested on 5.7.2)
+- Windows 10/11
+- To build the C++ plugin: Visual Studio Build Tools 2022 + Windows 10 SDK
+
+### Install into your project
+
+Copy:
+
+`ue-agent/unreal/UEAgentBridge` → `<YourProject>/Plugins/UEAgentBridge`
+
+Then enable in:
+
+`Edit → Plugins → UEAgentBridge`
+
+### Run
+
+In the editor:
+
+`Window → UE Agent`
+
+### Settings (LLM)
+
+In the `Settings` page:
+
+- Pick a `Provider preset`
+- Enter an `API Key` (if required)
+- Pick a `Model` (or press `Refresh` to load model list)
+- Press `Save`
+
+### Chat persistence
+
+Saved per project at:
+
+`<Project>/Saved/UEAgentBridge/conversations.json`
 
 

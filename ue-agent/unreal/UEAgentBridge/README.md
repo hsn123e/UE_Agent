@@ -1,45 +1,67 @@
 ﻿# UEAgentBridge (Unreal Editor Plugin)
 
-إضافة Editor بسيطة توفر:
+## العربية
 
-- تبويب داخل المحرر: `Window → UE Agent` (دردشة + إعدادات + محادثات محفوظة).
-- HTTP endpoints على `localhost` لتوفير أدوات آمنة (JSON) يمكن استدعاؤها من عميل خارجي.
+إضافة Editor توفر:
 
-## التثبيت
+- واجهة داخل المحرر: `Window → UE Agent`
+- HTTP Bridge محلي على `localhost`
+
+### التثبيت
 
 انسخ هذا المجلد إلى مشروعك:
 
 `ue-agent/unreal/UEAgentBridge` → `<YourProject>/Plugins/UEAgentBridge`
 
-ثم افتح مشروع Unreal وفعّل الإضافة من `Edit → Plugins`.
+ثم فعّل الإضافة من:
 
-## التشغيل داخل المحرر
+`Edit → Plugins → UEAgentBridge`
 
-افتح:
+### إعدادات HTTP Bridge
 
-`Window → UE Agent`
-
-- زر `Settings` لإدخال `Base URL / API Key / Model` واختيار المزوّد.
-- قائمة محادثات (New / Delete) مع حفظ تلقائي.
-- `Enter` يرسل، `Shift+Enter` سطر جديد.
-
-## إعداد الجسر (HTTP Bridge)
-
-الإضافة تقرأ إعداداتها من متغيرات البيئة عند تشغيل المحرر:
+متغيرات البيئة (اختياري):
 
 - `UE_AGENT_BRIDGE_PORT` (افتراضي: `30020`)
-- `UE_AGENT_BRIDGE_TOKEN` (اختياري): إذا تم ضبطه، يجب إرسال
+- `UE_AGENT_BRIDGE_TOKEN` (اختياري): عند ضبطه يجب إرسال
   `Authorization: Bearer <token>` مع كل طلب
 
-## Endpoints
+### Endpoints
 
 - `GET /ue-agent/health`
 - `GET /ue-agent/tools`
-- `POST /ue-agent/tools/call` body:
-  - `{ "toolName": "project.get_name", "input": {} }`
+- `POST /ue-agent/tools/call`
 
-## ملاحظة أمنية
+---
 
-هذا الجسر مصمم للاستخدام المحلي فقط (`localhost`). لا تفتحه على الشبكة ولا تشارك مفاتيح API أو Token.
+## English
+
+Editor plugin that provides:
+
+- In-editor UI: `Window → UE Agent`
+- Local HTTP bridge on `localhost`
+
+### Install
+
+Copy this folder into your project:
+
+`ue-agent/unreal/UEAgentBridge` → `<YourProject>/Plugins/UEAgentBridge`
+
+Enable it in:
+
+`Edit → Plugins → UEAgentBridge`
+
+### HTTP bridge settings
+
+Environment variables (optional):
+
+- `UE_AGENT_BRIDGE_PORT` (default: `30020`)
+- `UE_AGENT_BRIDGE_TOKEN` (optional): if set, send
+  `Authorization: Bearer <token>` on every request
+
+### Endpoints
+
+- `GET /ue-agent/health`
+- `GET /ue-agent/tools`
+- `POST /ue-agent/tools/call`
 
 

@@ -542,6 +542,16 @@ public:
 			ProviderPresets.Add(MoveTemp(P));
 		}
 
+		// Ollama Local (native /chat endpoint)
+		{
+			FProviderPreset P;
+			P.Label = TEXT("Ollama (Local)");
+			P.Provider = EUEAgentProvider::OllamaCloud;
+			P.BaseUrl = TEXT("http://localhost:11434/api");
+			P.bAllowEditBaseUrl = false;
+			ProviderPresets.Add(MoveTemp(P));
+		}
+
 		// OpenAI-compatible presets (common providers)
 		auto AddOpenAICompat = [this](const FString& Label, const FString& Url, const TArray<FString>& Models)
 		{
