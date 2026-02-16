@@ -210,6 +210,7 @@ static FString GetAgentSystemPrompt()
 		"- asset.search, asset.create_blueprint\n"
 		"- ai.create_behavior_tree, ai.create_blackboard, ai.setup_wander_for_selected_actor\n"
 		"- anim.setup_locomotion_for_selected_actor\n"
+		"- character.setup_wander_and_locomotion_for_selected_actor\n"
 		"- skeleton.list_sockets, skeleton.add_socket\n"
 		"- blueprint.compile\n"
 		"- blueprint.get_graph_t3d, blueprint.paste_t3d\n"
@@ -1720,6 +1721,46 @@ public:
 
 			Schema->SetObjectField(TEXT("properties"), Props);
 			OutTools.Add(MakeTool(TEXT("ai.setup_wander_for_selected_actor"), TEXT("Create a simple wander AI setup (BB/BT/AIController) under /Game/... and apply it to the selected Character immediately."), Schema));
+		}
+
+		{
+			auto Schema = EmptyObjSchema();
+			auto Props = MakeShared<FJsonObject>();
+
+			auto FolderProp = MakeShared<FJsonObject>();
+			FolderProp->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("folder"), FolderProp);
+
+			auto RadiusProp = MakeShared<FJsonObject>();
+			RadiusProp->SetStringField(TEXT("type"), TEXT("number"));
+			Props->SetObjectField(TEXT("radius"), RadiusProp);
+
+			auto WaitMinProp = MakeShared<FJsonObject>();
+			WaitMinProp->SetStringField(TEXT("type"), TEXT("number"));
+			Props->SetObjectField(TEXT("waitMin"), WaitMinProp);
+
+			auto WaitMaxProp = MakeShared<FJsonObject>();
+			WaitMaxProp->SetStringField(TEXT("type"), TEXT("number"));
+			Props->SetObjectField(TEXT("waitMax"), WaitMaxProp);
+
+			auto PackageProp = MakeShared<FJsonObject>();
+			PackageProp->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("packagePath"), PackageProp);
+
+			auto PreferProp = MakeShared<FJsonObject>();
+			PreferProp->SetStringField(TEXT("type"), TEXT("boolean"));
+			Props->SetObjectField(TEXT("preferExistingAnimBP"), PreferProp);
+
+			auto CreateProp = MakeShared<FJsonObject>();
+			CreateProp->SetStringField(TEXT("type"), TEXT("boolean"));
+			Props->SetObjectField(TEXT("createIfMissing"), CreateProp);
+
+			auto OutFolderProp = MakeShared<FJsonObject>();
+			OutFolderProp->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("outputFolder"), OutFolderProp);
+
+			Schema->SetObjectField(TEXT("properties"), Props);
+			OutTools.Add(MakeTool(TEXT("character.setup_wander_and_locomotion_for_selected_actor"), TEXT("One-shot setup for the selected Character: create wander AI (BB/BT/AIController) and set up locomotion animation/AnimBP."), Schema));
 		}
 
 		{
@@ -3817,6 +3858,52 @@ bool FUEAgentBridgeModule::HandleTools(const FHttpServerRequest& Request, const 
 
 	{
 		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("character.setup_wander_and_locomotion_for_selected_actor"));
+		Tool->SetStringField(TEXT("description"), TEXT("One-shot setup for the selected Character: create wander AI (BB/BT/AIController) and set up locomotion animation/AnimBP."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto FolderProp = MakeShared<FJsonObject>();
+		FolderProp->SetStringField(TEXT("type"), TEXT("string"));
+		Props->SetObjectField(TEXT("folder"), FolderProp);
+
+		auto RadiusProp = MakeShared<FJsonObject>();
+		RadiusProp->SetStringField(TEXT("type"), TEXT("number"));
+		Props->SetObjectField(TEXT("radius"), RadiusProp);
+
+		auto WaitMinProp = MakeShared<FJsonObject>();
+		WaitMinProp->SetStringField(TEXT("type"), TEXT("number"));
+		Props->SetObjectField(TEXT("waitMin"), WaitMinProp);
+
+		auto WaitMaxProp = MakeShared<FJsonObject>();
+		WaitMaxProp->SetStringField(TEXT("type"), TEXT("number"));
+		Props->SetObjectField(TEXT("waitMax"), WaitMaxProp);
+
+		auto PackageProp = MakeShared<FJsonObject>();
+		PackageProp->SetStringField(TEXT("type"), TEXT("string"));
+		Props->SetObjectField(TEXT("packagePath"), PackageProp);
+
+		auto PreferProp = MakeShared<FJsonObject>();
+		PreferProp->SetStringField(TEXT("type"), TEXT("boolean"));
+		Props->SetObjectField(TEXT("preferExistingAnimBP"), PreferProp);
+
+		auto CreateProp = MakeShared<FJsonObject>();
+		CreateProp->SetStringField(TEXT("type"), TEXT("boolean"));
+		Props->SetObjectField(TEXT("createIfMissing"), CreateProp);
+
+		auto OutFolderProp = MakeShared<FJsonObject>();
+		OutFolderProp->SetStringField(TEXT("type"), TEXT("string"));
+		Props->SetObjectField(TEXT("outputFolder"), OutFolderProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
 		Tool->SetStringField(TEXT("name"), TEXT("anim.setup_locomotion_for_selected_actor"));
 		Tool->SetStringField(TEXT("description"), TEXT("Auto-assign locomotion animation: prefer an existing AnimBP for the selected Character's skeleton, otherwise pick a best-match idle/walk animation asset."));
 		auto Schema = MakeShared<FJsonObject>();
@@ -4535,6 +4622,7 @@ bool FUEAgentBridgeModule::ExecuteToolForUI(const FString& ToolName, const TShar
 	else if (ToolKey == TEXT("ai.create_blackboard")) { HandleTool_AICreateBlackboard(Input, Cb); }
 	else if (ToolKey == TEXT("ai.setup_wander_for_selected_actor")) { HandleTool_AISetupWanderForSelectedActor(Input, Cb); }
 	else if (ToolKey == TEXT("anim.setup_locomotion_for_selected_actor")) { HandleTool_AnimSetupLocomotionForSelectedActor(Input, Cb); }
+	else if (ToolKey == TEXT("character.setup_wander_and_locomotion_for_selected_actor")) { HandleTool_CharacterSetupWanderAndLocomotionForSelectedActor(Input, Cb); }
 	else if (ToolKey == TEXT("skeleton.list_sockets")) { HandleTool_SkeletonListSockets(Input, Cb); }
 	else if (ToolKey == TEXT("skeleton.add_socket")) { HandleTool_SkeletonAddSocket(Input, Cb); }
 	else if (ToolKey == TEXT("blueprint.set_cdo_property")) { HandleTool_BlueprintSetCDOProperty(Input, Cb); }
@@ -4649,6 +4737,7 @@ bool FUEAgentBridgeModule::HandleToolCall(const FHttpServerRequest& Request, con
 		if (ToolKey == TEXT("ai.create_blackboard")) { HandleTool_AICreateBlackboard(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("ai.setup_wander_for_selected_actor")) { HandleTool_AISetupWanderForSelectedActor(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("anim.setup_locomotion_for_selected_actor")) { HandleTool_AnimSetupLocomotionForSelectedActor(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("character.setup_wander_and_locomotion_for_selected_actor")) { HandleTool_CharacterSetupWanderAndLocomotionForSelectedActor(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("skeleton.list_sockets")) { HandleTool_SkeletonListSockets(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("skeleton.add_socket")) { HandleTool_SkeletonAddSocket(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("blueprint.set_cdo_property")) { HandleTool_BlueprintSetCDOProperty(InputObj, OnComplete); return; }
@@ -8050,6 +8139,131 @@ bool FUEAgentBridgeModule::HandleTool_AnimSetupLocomotionForSelectedActor(const 
 	Out->SetBoolField(TEXT("ok"), false);
 	Out->SetStringField(TEXT("error"), TEXT("No compatible AnimBlueprint or AnimSequence found under packagePath for the selected skeleton."));
 	OnComplete(JsonResponse(Out, 404));
+	return true;
+}
+
+bool FUEAgentBridgeModule::HandleTool_CharacterSetupWanderAndLocomotionForSelectedActor(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+
+	FString Folder = TEXT("/Game/test");
+	double Radius = 1200.0;
+	double WaitMin = 1.0;
+	double WaitMax = 3.0;
+
+	FString PackagePath = TEXT("/Game");
+	bool bPreferExistingAnimBP = true;
+	bool bCreateIfMissing = true;
+	FString OutputFolder = TEXT("");
+
+	if (Input.IsValid())
+	{
+		Input->TryGetStringField(TEXT("folder"), Folder);
+		Input->TryGetNumberField(TEXT("radius"), Radius);
+		Input->TryGetNumberField(TEXT("waitMin"), WaitMin);
+		Input->TryGetNumberField(TEXT("waitMax"), WaitMax);
+
+		Input->TryGetStringField(TEXT("packagePath"), PackagePath);
+		Input->TryGetBoolField(TEXT("preferExistingAnimBP"), bPreferExistingAnimBP);
+		Input->TryGetBoolField(TEXT("createIfMissing"), bCreateIfMissing);
+		Input->TryGetStringField(TEXT("outputFolder"), OutputFolder);
+	}
+
+	Folder = NormalizeGameFolder(Folder);
+	if (OutputFolder.TrimStartAndEnd().IsEmpty())
+	{
+		OutputFolder = Folder;
+	}
+	OutputFolder = NormalizeGameFolder(OutputFolder);
+
+	Radius = FMath::Clamp(Radius, 200.0, 20000.0);
+	WaitMin = FMath::Clamp(WaitMin, 0.0, 30.0);
+	WaitMax = FMath::Clamp(WaitMax, 0.0, 30.0);
+	if (WaitMax < WaitMin)
+	{
+		Swap(WaitMax, WaitMin);
+	}
+
+	if (PackagePath.IsEmpty())
+	{
+		PackagePath = TEXT("/Game");
+	}
+	if (!PackagePath.StartsWith(TEXT("/")))
+	{
+		PackagePath = TEXT("/") + PackagePath;
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Steps;
+	auto AddStep = [&Steps](const FString& S)
+	{
+		Steps.Add(MakeShared<FJsonValueString>(S));
+	};
+
+	AddStep(FString::Printf(TEXT("AI: create BB/BT/AIController under %s and apply to selected actor"), *Folder));
+
+	// 1) Wander AI setup
+	TSharedPtr<FJsonObject> AIResultObj;
+	{
+		TSharedPtr<FJsonObject> AIIn = MakeShared<FJsonObject>();
+		AIIn->SetStringField(TEXT("folder"), Folder);
+		AIIn->SetNumberField(TEXT("radius"), Radius);
+		AIIn->SetNumberField(TEXT("waitMin"), WaitMin);
+		AIIn->SetNumberField(TEXT("waitMax"), WaitMax);
+
+		TUniquePtr<FHttpServerResponse> Captured;
+		FHttpResultCallback Cb = [&Captured](TUniquePtr<FHttpServerResponse>&& Resp) { Captured = MoveTemp(Resp); };
+		HandleTool_AISetupWanderForSelectedActor(AIIn, Cb);
+
+		const FString Body = Captured ? HttpResponseBodyToString(*Captured) : TEXT("");
+		TryParseJsonObject(Body, AIResultObj);
+		if (!AIResultObj.IsValid() || !AIResultObj->GetBoolField(TEXT("ok")))
+		{
+			Out->SetBoolField(TEXT("ok"), false);
+			Out->SetStringField(TEXT("error"), TEXT("Wander AI setup failed"));
+			Out->SetNumberField(TEXT("aiStatusCode"), Captured ? (int32)Captured->Code : 0);
+			Out->SetStringField(TEXT("aiBody"), Body.Left(8000));
+			OnComplete(JsonResponse(Out, 500));
+			return true;
+		}
+	}
+
+	AddStep(FString::Printf(TEXT("Anim: setup locomotion from %s (output to %s) and apply to selected actor"), *PackagePath, *OutputFolder));
+
+	// 2) Locomotion setup
+	TSharedPtr<FJsonObject> AnimResultObj;
+	{
+		TSharedPtr<FJsonObject> AnimIn = MakeShared<FJsonObject>();
+		AnimIn->SetStringField(TEXT("packagePath"), PackagePath);
+		AnimIn->SetBoolField(TEXT("preferExistingAnimBP"), bPreferExistingAnimBP);
+		AnimIn->SetBoolField(TEXT("createIfMissing"), bCreateIfMissing);
+		AnimIn->SetStringField(TEXT("outputFolder"), OutputFolder);
+
+		TUniquePtr<FHttpServerResponse> Captured;
+		FHttpResultCallback Cb = [&Captured](TUniquePtr<FHttpServerResponse>&& Resp) { Captured = MoveTemp(Resp); };
+		HandleTool_AnimSetupLocomotionForSelectedActor(AnimIn, Cb);
+
+		const FString Body = Captured ? HttpResponseBodyToString(*Captured) : TEXT("");
+		TryParseJsonObject(Body, AnimResultObj);
+		if (!AnimResultObj.IsValid() || !AnimResultObj->GetBoolField(TEXT("ok")))
+		{
+			Out->SetBoolField(TEXT("ok"), false);
+			Out->SetStringField(TEXT("error"), TEXT("Locomotion setup failed"));
+			Out->SetNumberField(TEXT("animStatusCode"), Captured ? (int32)Captured->Code : 0);
+			Out->SetStringField(TEXT("animBody"), Body.Left(8000));
+			OnComplete(JsonResponse(Out, 500));
+			return true;
+		}
+	}
+
+	AddStep(TEXT("Done: AI + locomotion applied to selected actor"));
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetStringField(TEXT("folder"), Folder);
+	Out->SetStringField(TEXT("outputFolder"), OutputFolder);
+	Out->SetArrayField(TEXT("steps"), Steps);
+	Out->SetObjectField(TEXT("ai"), AIResultObj);
+	Out->SetObjectField(TEXT("anim"), AnimResultObj);
+	OnComplete(JsonResponse(Out, 200));
 	return true;
 }
 

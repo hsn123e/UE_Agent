@@ -58,6 +58,7 @@ private:
 	bool HandleTool_AICreateBlackboard(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_AISetupWanderForSelectedActor(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_AnimSetupLocomotionForSelectedActor(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
+	bool HandleTool_CharacterSetupWanderAndLocomotionForSelectedActor(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_SkeletonListSockets(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_SkeletonAddSocket(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_UmgCreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
