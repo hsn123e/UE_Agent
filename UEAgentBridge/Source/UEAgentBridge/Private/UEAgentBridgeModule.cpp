@@ -62,6 +62,8 @@
 #include "Components/Image.h"
 #include "Components/Border.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/ActorComponent.h"
+#include "Components/SceneComponent.h"
 
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimationAsset.h"
@@ -100,6 +102,8 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "KismetCompilerModule.h"
 #include "FileHelpers.h"
+#include "Engine/SimpleConstructionScript.h"
+#include "Engine/SCS_Node.h"
 #include "Engine/Selection.h"
 #include "Engine/Texture2D.h"
 #include "Engine/World.h"
@@ -215,6 +219,7 @@ static FString GetAgentSystemPrompt()
 		"- blueprint.k2.add_variable_get, blueprint.k2.add_variable_set\n"
 		"- blueprint.k2.connect_pins, blueprint.k2.set_pin_default\n"
 		"- blueprint.set_cdo_property\n"
+		"- blueprint.create, blueprint.add_component, blueprint.set_component_property\n"
 		"- umg.create_widget_blueprint, umg.add_widget, umg.set_text, umg.set_properties, umg.scaffold_layout\n"
 		"- umg.bind_event, umg.bind_property, umg.unbind, umg.list_widgets, umg.compile\n"
 		"\n"
@@ -1333,7 +1338,7 @@ public:
 
 						+ SVerticalBox::Slot().AutoHeight().Padding(0, 10)
 						[
-							SNew(STextBlock).Text(FText::FromString(TEXT("Max steps (1-200)")))
+							SNew(STextBlock).Text(FText::FromString(TEXT("Max steps (0-5000, 0=5000)")))
 						]
 						+ SVerticalBox::Slot().AutoHeight()
 						[
@@ -1534,7 +1539,7 @@ public:
 		{
 			const FString S = MaxStepsBox->GetText().ToString().TrimStartAndEnd();
 			MaxSteps = FCString::Atoi(*S);
-			MaxSteps = FMath::Clamp(MaxSteps, 1, 500);
+			MaxSteps = FMath::Clamp(MaxSteps, 0, 5000);
 			MaxStepsBox->SetText(FText::AsNumber(MaxSteps));
 		}
 		Settings->Provider = Provider;
@@ -1888,6 +1893,105 @@ public:
 			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("value")));
 			Schema->SetArrayField(TEXT("required"), ReqArr);
 			OutTools.Add(MakeTool(TEXT("blueprint.set_cdo_property"), TEXT("Set a Blueprint class default object (CDO) property by name."), Schema));
+		}
+
+		{
+			auto Schema = EmptyObjSchema();
+			auto Props = MakeShared<FJsonObject>();
+
+			auto NameProp = MakeShared<FJsonObject>();
+			NameProp->SetStringField(TEXT("type"), TEXT("string"));
+			NameProp->SetNumberField(TEXT("minLength"), 1);
+			Props->SetObjectField(TEXT("name"), NameProp);
+
+			auto FolderProp = MakeShared<FJsonObject>();
+			FolderProp->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("folder"), FolderProp);
+
+			auto ParentProp = MakeShared<FJsonObject>();
+			ParentProp->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("parentClassPath"), ParentProp);
+
+			Schema->SetObjectField(TEXT("properties"), Props);
+			TArray<TSharedPtr<FJsonValue>> ReqArr;
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("name")));
+			Schema->SetArrayField(TEXT("required"), ReqArr);
+
+			OutTools.Add(MakeTool(TEXT("blueprint.create"), TEXT("Create a Blueprint at /Game/... using name + optional folder + optional parentClassPath."), Schema));
+		}
+
+		{
+			auto Schema = EmptyObjSchema();
+			auto Props = MakeShared<FJsonObject>();
+
+			auto BPProp = MakeShared<FJsonObject>();
+			BPProp->SetStringField(TEXT("type"), TEXT("string"));
+			BPProp->SetNumberField(TEXT("minLength"), 1);
+			Props->SetObjectField(TEXT("blueprintPath"), BPProp);
+
+			auto CompClassProp = MakeShared<FJsonObject>();
+			CompClassProp->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("componentClassPath"), CompClassProp);
+
+			auto CompTypeProp = MakeShared<FJsonObject>();
+			CompTypeProp->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("componentType"), CompTypeProp);
+
+			auto CompNameProp = MakeShared<FJsonObject>();
+			CompNameProp->SetStringField(TEXT("type"), TEXT("string"));
+			CompNameProp->SetNumberField(TEXT("minLength"), 1);
+			Props->SetObjectField(TEXT("componentName"), CompNameProp);
+
+			auto ParentNameProp = MakeShared<FJsonObject>();
+			ParentNameProp->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("attachToComponentName"), ParentNameProp);
+
+			Schema->SetObjectField(TEXT("properties"), Props);
+			TArray<TSharedPtr<FJsonValue>> ReqArr;
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("componentName")));
+			Schema->SetArrayField(TEXT("required"), ReqArr);
+
+			OutTools.Add(MakeTool(TEXT("blueprint.add_component"), TEXT("Add a component to a Blueprint's SCS by class path or type name."), Schema));
+		}
+
+		{
+			auto Schema = EmptyObjSchema();
+			auto Props = MakeShared<FJsonObject>();
+
+			auto BPProp = MakeShared<FJsonObject>();
+			BPProp->SetStringField(TEXT("type"), TEXT("string"));
+			BPProp->SetNumberField(TEXT("minLength"), 1);
+			Props->SetObjectField(TEXT("blueprintPath"), BPProp);
+
+			auto CompNameProp = MakeShared<FJsonObject>();
+			CompNameProp->SetStringField(TEXT("type"), TEXT("string"));
+			CompNameProp->SetNumberField(TEXT("minLength"), 1);
+			Props->SetObjectField(TEXT("componentName"), CompNameProp);
+
+			auto PropNameProp = MakeShared<FJsonObject>();
+			PropNameProp->SetStringField(TEXT("type"), TEXT("string"));
+			PropNameProp->SetNumberField(TEXT("minLength"), 1);
+			Props->SetObjectField(TEXT("propertyName"), PropNameProp);
+
+			auto ValueTypeProp = MakeShared<FJsonObject>();
+			ValueTypeProp->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("valueType"), ValueTypeProp);
+
+			auto ValueProp = MakeShared<FJsonObject>();
+			ValueProp->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("value"), ValueProp);
+
+			Schema->SetObjectField(TEXT("properties"), Props);
+			TArray<TSharedPtr<FJsonValue>> ReqArr;
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("componentName")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("propertyName")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("valueType")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("value")));
+			Schema->SetArrayField(TEXT("required"), ReqArr);
+
+			OutTools.Add(MakeTool(TEXT("blueprint.set_component_property"), TEXT("Set a component template property on a Blueprint by name. Supports bool/number/string/objectPath."), Schema));
 		}
 	}
 
@@ -2440,8 +2544,8 @@ private:
 
 		bBusy = true;
 		bDisableToolCalling = false;
-		const int32 RequestedSteps = (MaxSteps <= 0) ? 200 : MaxSteps;
-		StepsRemaining = FMath::Clamp(RequestedSteps, 1, 500);
+		const int32 RequestedSteps = (MaxSteps <= 0) ? 5000 : MaxSteps;
+		StepsRemaining = FMath::Clamp(RequestedSteps, 1, 5000);
 
 		FConversation* C = GetActiveConversation();
 		if (!C)
@@ -3517,6 +3621,128 @@ bool FUEAgentBridgeModule::HandleTools(const FHttpServerRequest& Request, const 
 
 	{
 		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("blueprint.create"));
+		Tool->SetStringField(TEXT("description"), TEXT("Create a Blueprint asset under /Game/... using name + optional folder + optional parentClassPath."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto NameProp = MakeShared<FJsonObject>();
+		NameProp->SetStringField(TEXT("type"), TEXT("string"));
+		NameProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("name"), NameProp);
+
+		auto FolderProp = MakeShared<FJsonObject>();
+		FolderProp->SetStringField(TEXT("type"), TEXT("string"));
+		Props->SetObjectField(TEXT("folder"), FolderProp);
+
+		auto ParentProp = MakeShared<FJsonObject>();
+		ParentProp->SetStringField(TEXT("type"), TEXT("string"));
+		Props->SetObjectField(TEXT("parentClassPath"), ParentProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("name")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("blueprint.add_component"));
+		Tool->SetStringField(TEXT("description"), TEXT("Add a component to a Blueprint's SCS by class path or type name."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto BPProp = MakeShared<FJsonObject>();
+		BPProp->SetStringField(TEXT("type"), TEXT("string"));
+		BPProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("blueprintPath"), BPProp);
+
+		auto CompNameProp = MakeShared<FJsonObject>();
+		CompNameProp->SetStringField(TEXT("type"), TEXT("string"));
+		CompNameProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("componentName"), CompNameProp);
+
+		auto CompClassProp = MakeShared<FJsonObject>();
+		CompClassProp->SetStringField(TEXT("type"), TEXT("string"));
+		Props->SetObjectField(TEXT("componentClassPath"), CompClassProp);
+
+		auto CompTypeProp = MakeShared<FJsonObject>();
+		CompTypeProp->SetStringField(TEXT("type"), TEXT("string"));
+		Props->SetObjectField(TEXT("componentType"), CompTypeProp);
+
+		auto AttachProp = MakeShared<FJsonObject>();
+		AttachProp->SetStringField(TEXT("type"), TEXT("string"));
+		Props->SetObjectField(TEXT("attachToComponentName"), AttachProp);
+
+		auto CompileProp = MakeShared<FJsonObject>();
+		CompileProp->SetStringField(TEXT("type"), TEXT("boolean"));
+		Props->SetObjectField(TEXT("compile"), CompileProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("componentName")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("blueprint.set_component_property"));
+		Tool->SetStringField(TEXT("description"), TEXT("Set a component template property on a Blueprint by name. Supports bool/number/string/objectPath."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto BPProp = MakeShared<FJsonObject>();
+		BPProp->SetStringField(TEXT("type"), TEXT("string"));
+		BPProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("blueprintPath"), BPProp);
+
+		auto CompNameProp = MakeShared<FJsonObject>();
+		CompNameProp->SetStringField(TEXT("type"), TEXT("string"));
+		CompNameProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("componentName"), CompNameProp);
+
+		auto PropName = MakeShared<FJsonObject>();
+		PropName->SetStringField(TEXT("type"), TEXT("string"));
+		PropName->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("propertyName"), PropName);
+
+		auto ValueType = MakeShared<FJsonObject>();
+		ValueType->SetStringField(TEXT("type"), TEXT("string"));
+		Props->SetObjectField(TEXT("valueType"), ValueType);
+
+		auto Value = MakeShared<FJsonObject>();
+		Value->SetStringField(TEXT("type"), TEXT("string"));
+		Props->SetObjectField(TEXT("value"), Value);
+
+		auto CompileProp = MakeShared<FJsonObject>();
+		CompileProp->SetStringField(TEXT("type"), TEXT("boolean"));
+		Props->SetObjectField(TEXT("compile"), CompileProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("componentName")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("propertyName")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("valueType")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("value")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
 		Tool->SetStringField(TEXT("name"), TEXT("ai.create_behavior_tree"));
 		Tool->SetStringField(TEXT("description"), TEXT("Create a BehaviorTree asset at /Game/..."));
 		auto Schema = MakeShared<FJsonObject>();
@@ -4312,6 +4538,9 @@ bool FUEAgentBridgeModule::ExecuteToolForUI(const FString& ToolName, const TShar
 	else if (ToolKey == TEXT("skeleton.list_sockets")) { HandleTool_SkeletonListSockets(Input, Cb); }
 	else if (ToolKey == TEXT("skeleton.add_socket")) { HandleTool_SkeletonAddSocket(Input, Cb); }
 	else if (ToolKey == TEXT("blueprint.set_cdo_property")) { HandleTool_BlueprintSetCDOProperty(Input, Cb); }
+	else if (ToolKey == TEXT("blueprint.create")) { HandleTool_BlueprintCreate(Input, Cb); }
+	else if (ToolKey == TEXT("blueprint.add_component")) { HandleTool_BlueprintAddComponent(Input, Cb); }
+	else if (ToolKey == TEXT("blueprint.set_component_property")) { HandleTool_BlueprintSetComponentProperty(Input, Cb); }
 	else if (ToolKey == TEXT("blueprint.compile")) { HandleTool_BlueprintCompile(Input, Cb); }
 	else if (ToolKey == TEXT("blueprint.get_graph_t3d")) { HandleTool_BlueprintGetGraphT3D(Input, Cb); }
 	else if (ToolKey == TEXT("blueprint.paste_t3d")) { HandleTool_BlueprintPasteT3D(Input, Cb); }
@@ -4423,6 +4652,9 @@ bool FUEAgentBridgeModule::HandleToolCall(const FHttpServerRequest& Request, con
 		if (ToolKey == TEXT("skeleton.list_sockets")) { HandleTool_SkeletonListSockets(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("skeleton.add_socket")) { HandleTool_SkeletonAddSocket(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("blueprint.set_cdo_property")) { HandleTool_BlueprintSetCDOProperty(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("blueprint.create")) { HandleTool_BlueprintCreate(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("blueprint.add_component")) { HandleTool_BlueprintAddComponent(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("blueprint.set_component_property")) { HandleTool_BlueprintSetComponentProperty(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("blueprint.compile")) { HandleTool_BlueprintCompile(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("blueprint.get_graph_t3d")) { HandleTool_BlueprintGetGraphT3D(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("blueprint.paste_t3d")) { HandleTool_BlueprintPasteT3D(InputObj, OnComplete); return; }
@@ -6243,6 +6475,495 @@ bool FUEAgentBridgeModule::HandleTool_BlueprintSetCDOProperty(const TSharedPtr<F
 	}
 
 	FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
+	if (UPackage* Package = BP->GetOutermost())
+	{
+		Package->MarkPackageDirty();
+	}
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetStringField(TEXT("result"), TEXT("updated"));
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
+// Forward declarations (helpers defined later in this file).
+static FString NormalizeGameFolder(const FString& InFolder);
+static FString JoinAssetPath(const FString& Folder, const FString& AssetName);
+
+static bool SetPropertyOnObject(UObject* Target, const FString& PropertyName, const FString& ValueType, const FString& Value, FString& OutError)
+{
+	if (!Target)
+	{
+		OutError = TEXT("Missing target object");
+		return false;
+	}
+	if (PropertyName.IsEmpty())
+	{
+		OutError = TEXT("Missing propertyName");
+		return false;
+	}
+
+	FProperty* Prop = FindFProperty<FProperty>(Target->GetClass(), *PropertyName);
+	if (!Prop)
+	{
+		OutError = TEXT("Property not found");
+		return false;
+	}
+
+	const FString Type = ValueType.ToLower();
+	void* Addr = Prop->ContainerPtrToValuePtr<void>(Target);
+	if (!Addr)
+	{
+		OutError = TEXT("Failed to resolve property address");
+		return false;
+	}
+
+	if (Type == TEXT("bool"))
+	{
+		if (FBoolProperty* BoolProp = CastField<FBoolProperty>(Prop))
+		{
+			BoolProp->SetPropertyValue(Addr, Value.Equals(TEXT("true"), ESearchCase::IgnoreCase) || Value == TEXT("1"));
+			return true;
+		}
+	}
+	else if (Type == TEXT("number"))
+	{
+		if (FNumericProperty* NumProp = CastField<FNumericProperty>(Prop))
+		{
+			if (NumProp->IsInteger())
+			{
+				int64 I = FCString::Atoi64(*Value);
+				NumProp->SetIntPropertyValue(Addr, I);
+			}
+			else
+			{
+				double D = FCString::Atod(*Value);
+				NumProp->SetFloatingPointPropertyValue(Addr, D);
+			}
+			return true;
+		}
+	}
+	else if (Type == TEXT("string"))
+	{
+		if (FStrProperty* StrProp = CastField<FStrProperty>(Prop))
+		{
+			StrProp->SetPropertyValue(Addr, Value);
+			return true;
+		}
+		if (FNameProperty* NameProp = CastField<FNameProperty>(Prop))
+		{
+			NameProp->SetPropertyValue(Addr, FName(*Value));
+			return true;
+		}
+		if (FTextProperty* TextProp = CastField<FTextProperty>(Prop))
+		{
+			TextProp->SetPropertyValue(Addr, FText::FromString(Value));
+			return true;
+		}
+	}
+	else if (Type == TEXT("objectpath"))
+	{
+		UObject* Obj = StaticLoadObject(UObject::StaticClass(), nullptr, *Value);
+		if (FObjectProperty* ObjProp = CastField<FObjectProperty>(Prop))
+		{
+			ObjProp->SetObjectPropertyValue(Addr, Obj);
+			return true;
+		}
+		if (FSoftObjectProperty* SoftObjProp = CastField<FSoftObjectProperty>(Prop))
+		{
+			const FSoftObjectPath Path(Value);
+			SoftObjProp->SetPropertyValue(Addr, FSoftObjectPtr(Path));
+			return true;
+		}
+	}
+
+	OutError = TEXT("Unsupported property/valueType combination");
+	return false;
+}
+
+static UClass* ResolveComponentClass(const FString& ComponentClassPath, const FString& ComponentType, FString& OutError)
+{
+	auto LoadByPath = [&OutError](const FString& Path) -> UClass*
+	{
+		if (Path.IsEmpty())
+		{
+			return nullptr;
+		}
+		UClass* Cls = StaticLoadClass(UActorComponent::StaticClass(), nullptr, *Path);
+		if (!Cls)
+		{
+			OutError = FString::Printf(TEXT("Failed to load component class: %s"), *Path);
+		}
+		return Cls;
+	};
+
+	if (!ComponentClassPath.IsEmpty())
+	{
+		return LoadByPath(ComponentClassPath);
+	}
+
+	FString T = ComponentType;
+	T.TrimStartAndEndInline();
+	if (T.IsEmpty())
+	{
+		OutError = TEXT("Missing componentClassPath or componentType");
+		return nullptr;
+	}
+
+	// Allow passing a class path via componentType too.
+	if (T.StartsWith(TEXT("/Script/")) || T.StartsWith(TEXT("/Game/")))
+	{
+		return LoadByPath(T);
+	}
+
+	const FString TL = T.ToLower();
+	if (TL == TEXT("scenecomponent") || TL == TEXT("scene_component"))
+	{
+		return LoadByPath(TEXT("/Script/Engine.SceneComponent"));
+	}
+	if (TL == TEXT("staticmeshcomponent") || TL == TEXT("static_mesh_component"))
+	{
+		return LoadByPath(TEXT("/Script/Engine.StaticMeshComponent"));
+	}
+	if (TL == TEXT("skeletalmeshcomponent") || TL == TEXT("skeletal_mesh_component"))
+	{
+		return LoadByPath(TEXT("/Script/Engine.SkeletalMeshComponent"));
+	}
+	if (TL == TEXT("capsulecomponent") || TL == TEXT("capsule_component"))
+	{
+		return LoadByPath(TEXT("/Script/Engine.CapsuleComponent"));
+	}
+	if (TL == TEXT("springarmcomponent") || TL == TEXT("spring_arm_component"))
+	{
+		return LoadByPath(TEXT("/Script/Engine.SpringArmComponent"));
+	}
+	if (TL == TEXT("cameracomponent") || TL == TEXT("camera_component"))
+	{
+		return LoadByPath(TEXT("/Script/Engine.CameraComponent"));
+	}
+	if (TL == TEXT("charactermovementcomponent") || TL == TEXT("character_movement_component"))
+	{
+		return LoadByPath(TEXT("/Script/Engine.CharacterMovementComponent"));
+	}
+
+	OutError = FString::Printf(TEXT("Unknown componentType: %s"), *ComponentType);
+	return nullptr;
+}
+
+bool FUEAgentBridgeModule::HandleTool_BlueprintCreate(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString Name;
+	if (!Input->TryGetStringField(TEXT("name"), Name) || Name.TrimStartAndEnd().IsEmpty())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing name"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+	Name.TrimStartAndEndInline();
+	Name.ReplaceInline(TEXT("/"), TEXT("_"));
+
+	FString Folder(TEXT("/Game/test"));
+	Input->TryGetStringField(TEXT("folder"), Folder);
+	Folder = NormalizeGameFolder(Folder);
+
+	FString ParentClassPath(TEXT("/Script/Engine.Actor"));
+	Input->TryGetStringField(TEXT("parentClassPath"), ParentClassPath);
+
+	const FString AssetPath = JoinAssetPath(Folder, Name);
+	const FString ObjectPath = AssetPath + TEXT(".") + Name;
+
+	if (UBlueprint* Existing = LoadObject<UBlueprint>(nullptr, *ObjectPath))
+	{
+		Out->SetBoolField(TEXT("ok"), true);
+		Out->SetStringField(TEXT("result"), Existing->GetPathName());
+		Out->SetBoolField(TEXT("alreadyExists"), true);
+		OnComplete(JsonResponse(Out, 200));
+		return true;
+	}
+
+	UClass* ParentClass = StaticLoadClass(UObject::StaticClass(), nullptr, *ParentClassPath);
+	if (!ParentClass)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load parent class"));
+		Out->SetStringField(TEXT("parentClassPath"), ParentClassPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UPackage* Package = CreatePackage(*AssetPath);
+	if (!Package)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to create package"));
+		Out->SetStringField(TEXT("assetPath"), AssetPath);
+		OnComplete(JsonResponse(Out, 500));
+		return true;
+	}
+
+	UBlueprint* BP = FKismetEditorUtilities::CreateBlueprint(
+		ParentClass,
+		Package,
+		FName(*Name),
+		EBlueprintType::BPTYPE_Normal,
+		UBlueprint::StaticClass(),
+		UBlueprintGeneratedClass::StaticClass(),
+		FName(TEXT("UEAgentBridge"))
+	);
+
+	if (!BP)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to create blueprint"));
+		OnComplete(JsonResponse(Out, 500));
+		return true;
+	}
+
+	FKismetEditorUtilities::CompileBlueprint(BP);
+	Package->MarkPackageDirty();
+	FAssetRegistryModule::AssetCreated(BP);
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetStringField(TEXT("result"), BP->GetPathName());
+	Out->SetStringField(TEXT("assetPath"), AssetPath);
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
+bool FUEAgentBridgeModule::HandleTool_BlueprintAddComponent(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString BlueprintPath;
+	FString ComponentName;
+	if (!Input->TryGetStringField(TEXT("blueprintPath"), BlueprintPath) || BlueprintPath.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("componentName"), ComponentName) || ComponentName.TrimStartAndEnd().IsEmpty())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing required fields"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString ComponentClassPath;
+	FString ComponentType;
+	FString AttachToName;
+	Input->TryGetStringField(TEXT("componentClassPath"), ComponentClassPath);
+	Input->TryGetStringField(TEXT("componentType"), ComponentType);
+	Input->TryGetStringField(TEXT("attachToComponentName"), AttachToName);
+
+	bool bCompile = true;
+	Input->TryGetBoolField(TEXT("compile"), bCompile);
+
+	UBlueprint* BP = LoadBlueprintByPath(BlueprintPath);
+	if (!BP)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load blueprint"));
+		Out->SetStringField(TEXT("blueprintPath"), BlueprintPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString ResolveErr;
+	UClass* ComponentClass = ResolveComponentClass(ComponentClassPath, ComponentType, ResolveErr);
+	if (!ComponentClass)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), ResolveErr.IsEmpty() ? TEXT("Failed to resolve component class") : ResolveErr);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	if (!BP->SimpleConstructionScript)
+	{
+		BP->SimpleConstructionScript = NewObject<USimpleConstructionScript>(BP, USimpleConstructionScript::StaticClass(), NAME_None, RF_Transactional);
+	}
+	USimpleConstructionScript* SCS = BP->SimpleConstructionScript;
+	if (!SCS)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Blueprint has no SimpleConstructionScript"));
+		OnComplete(JsonResponse(Out, 500));
+		return true;
+	}
+
+	ComponentName.TrimStartAndEndInline();
+	ComponentName.ReplaceInline(TEXT(" "), TEXT("_"));
+
+	// If already exists, return success.
+	for (USCS_Node* N : SCS->GetAllNodes())
+	{
+		if (N && N->GetVariableName().ToString().Equals(ComponentName, ESearchCase::IgnoreCase))
+		{
+			Out->SetBoolField(TEXT("ok"), true);
+			Out->SetStringField(TEXT("result"), TEXT("alreadyExists"));
+			Out->SetStringField(TEXT("componentName"), N->GetVariableName().ToString());
+			OnComplete(JsonResponse(Out, 200));
+			return true;
+		}
+	}
+
+	BP->Modify();
+	SCS->Modify();
+
+	USCS_Node* NewNode = SCS->CreateNode(ComponentClass, FName(*ComponentName));
+	if (!NewNode)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to create SCS node"));
+		OnComplete(JsonResponse(Out, 500));
+		return true;
+	}
+
+	USCS_Node* ParentNode = nullptr;
+	if (!AttachToName.TrimStartAndEnd().IsEmpty())
+	{
+		for (USCS_Node* N : SCS->GetAllNodes())
+		{
+			if (N && N->GetVariableName().ToString().Equals(AttachToName, ESearchCase::IgnoreCase))
+			{
+				ParentNode = N;
+				break;
+			}
+		}
+	}
+
+	// Default attach: attach SceneComponents to the first root node when possible.
+	if (!ParentNode && ComponentClass->IsChildOf(USceneComponent::StaticClass()))
+	{
+		const TArray<USCS_Node*>& Roots = SCS->GetRootNodes();
+		if (Roots.Num() > 0)
+		{
+			ParentNode = Roots[0];
+		}
+	}
+
+	// Add node to SCS. Prefer attaching under a parent if provided/found.
+	SCS->AddNode(NewNode);
+	if (ParentNode && ParentNode != NewNode)
+	{
+		ParentNode->AddChildNode(NewNode);
+	}
+
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
+	if (bCompile)
+	{
+		FKismetEditorUtilities::CompileBlueprint(BP);
+	}
+	if (UPackage* Package = BP->GetOutermost())
+	{
+		Package->MarkPackageDirty();
+	}
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetStringField(TEXT("result"), TEXT("added"));
+	Out->SetStringField(TEXT("componentName"), NewNode->GetVariableName().ToString());
+	Out->SetStringField(TEXT("componentClass"), ComponentClass->GetPathName());
+	if (ParentNode)
+	{
+		Out->SetStringField(TEXT("attachedTo"), ParentNode->GetVariableName().ToString());
+	}
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
+bool FUEAgentBridgeModule::HandleTool_BlueprintSetComponentProperty(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString BlueprintPath;
+	FString ComponentName;
+	FString PropertyName;
+	FString ValueType;
+	FString Value;
+	if (!Input->TryGetStringField(TEXT("blueprintPath"), BlueprintPath) || BlueprintPath.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("componentName"), ComponentName) || ComponentName.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("propertyName"), PropertyName) || PropertyName.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("valueType"), ValueType) || ValueType.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("value"), Value))
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing required fields"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	bool bCompile = true;
+	Input->TryGetBoolField(TEXT("compile"), bCompile);
+
+	UBlueprint* BP = LoadBlueprintByPath(BlueprintPath);
+	if (!BP || !BP->SimpleConstructionScript)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load blueprint/SCS"));
+		Out->SetStringField(TEXT("blueprintPath"), BlueprintPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	USimpleConstructionScript* SCS = BP->SimpleConstructionScript;
+	USCS_Node* Found = nullptr;
+	for (USCS_Node* N : SCS->GetAllNodes())
+	{
+		if (N && N->GetVariableName().ToString().Equals(ComponentName, ESearchCase::IgnoreCase))
+		{
+			Found = N;
+			break;
+		}
+	}
+	if (!Found || !Found->ComponentTemplate)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Component not found"));
+		Out->SetStringField(TEXT("componentName"), ComponentName);
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	BP->Modify();
+	Found->ComponentTemplate->Modify();
+
+	FString Err;
+	if (!SetPropertyOnObject(Found->ComponentTemplate, PropertyName, ValueType, Value, Err))
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), Err.IsEmpty() ? TEXT("Failed to set component property") : Err);
+		Out->SetStringField(TEXT("propertyName"), PropertyName);
+		Out->SetStringField(TEXT("valueType"), ValueType);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FBlueprintEditorUtils::MarkBlueprintAsModified(BP);
+	if (bCompile)
+	{
+		FKismetEditorUtilities::CompileBlueprint(BP);
+	}
 	if (UPackage* Package = BP->GetOutermost())
 	{
 		Package->MarkPackageDirty();

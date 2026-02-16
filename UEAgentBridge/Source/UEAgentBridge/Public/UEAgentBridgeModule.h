@@ -51,6 +51,9 @@ private:
 	bool HandleTool_BlueprintK2ConnectPins(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_BlueprintK2SetPinDefault(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_BlueprintSetCDOProperty(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
+	bool HandleTool_BlueprintCreate(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
+	bool HandleTool_BlueprintAddComponent(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
+	bool HandleTool_BlueprintSetComponentProperty(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_AICreateBehaviorTree(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_AICreateBlackboard(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_AISetupWanderForSelectedActor(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
