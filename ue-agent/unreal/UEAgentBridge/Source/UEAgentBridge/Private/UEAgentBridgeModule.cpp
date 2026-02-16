@@ -515,7 +515,9 @@ public:
 		}
 		if (ConversationListView.IsValid() && SelectedConversationItem.IsValid())
 		{
+			bSuppressConversationSelectionChanged = true;
 			ConversationListView->SetSelection(SelectedConversationItem);
+			bSuppressConversationSelectionChanged = false;
 		}
 	}
 
@@ -901,6 +903,10 @@ public:
 
 	void OnConversationSelected(TSharedPtr<FConversationListItem> Item, ESelectInfo::Type)
 	{
+		if (bSuppressConversationSelectionChanged)
+		{
+			return;
+		}
 		if (!Item.IsValid())
 		{
 			return;
@@ -1769,6 +1775,7 @@ private:
 	TArray<TSharedPtr<FConversationListItem>> ConversationListItems;
 	TSharedPtr<SListView<TSharedPtr<FConversationListItem>>> ConversationListView;
 	TSharedPtr<FConversationListItem> SelectedConversationItem;
+	bool bSuppressConversationSelectionChanged = false;
 };
 
 static TUniquePtr<FHttpServerResponse> JsonResponse(const TSharedPtr<FJsonObject>& Obj, int32 Code = 200)
