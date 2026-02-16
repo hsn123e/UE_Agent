@@ -290,6 +290,57 @@ public:
 		return Idx != INDEX_NONE ? &Conversations[Idx] : nullptr;
 	}
 
+	static FString MakeConversationTitleFromPrompt(const FString& Prompt)
+	{
+		FString S = Prompt;
+		S.ReplaceInline(TEXT("\r"), TEXT(""));
+		S.ReplaceInline(TEXT("\n"), TEXT(" "));
+		S.TrimStartAndEndInline();
+		while (S.Contains(TEXT("  ")))
+		{
+			S.ReplaceInline(TEXT("  "), TEXT(" "));
+		}
+
+		// Avoid tool_result JSON blobs becoming titles.
+		if (S.StartsWith(TEXT("{")))
+		{
+			return FString();
+		}
+
+		const int32 MaxLen = 42;
+		if (S.Len() > MaxLen)
+		{
+			return S.Left(MaxLen - 1) + TEXT("…");
+		}
+		return S;
+	}
+
+	void MaybeAutoTitleActiveConversation(const FString& Prompt)
+	{
+		FConversation* C = GetActiveConversation();
+		if (!C)
+		{
+			return;
+		}
+
+		const bool bNeedsTitle = C->Title.IsEmpty() || C->Title.StartsWith(TEXT("Chat "), ESearchCase::IgnoreCase) || C->Title.Equals(TEXT("Chat"), ESearchCase::IgnoreCase);
+		if (!bNeedsTitle)
+		{
+			return;
+		}
+
+		const FString NewTitle = MakeConversationTitleFromPrompt(Prompt);
+		if (NewTitle.IsEmpty())
+		{
+			return;
+		}
+
+		C->Title = NewTitle;
+		C->UpdatedAt = FDateTime::UtcNow();
+		RefreshConversationList();
+		SaveConversations();
+	}
+
 	void SyncTranscriptFromConversation()
 	{
 		Transcript.Empty();
@@ -1220,6 +1271,7 @@ public:
 		if (TranscriptBox.IsValid())
 		{
 			TranscriptBox->SetText(FText::FromString(Transcript));
+			TranscriptBox->ScrollTo(ETextLocation::EndOfDocument);
 		}
 	}
 
@@ -1748,6 +1800,8 @@ private:
 		C->UpdatedAt = FDateTime::UtcNow();
 		RefreshConversationList();
 		SaveConversations();
+
+		MaybeAutoTitleActiveConversation(Prompt);
 
 		AppendTranscript(TEXT("[user] ") + Prompt);
 		InputBox->SetText(FText::GetEmpty());
@@ -2908,35 +2962,37 @@ bool FUEAgentBridgeModule::ExecuteToolForUI(const FString& ToolName, const TShar
 	OutStatusCode = 500;
 	OutBodyJson = TEXT("{\"ok\":false,\"error\":\"Unhandled\"}");
 
+	const FString ToolKey = ToolName.ToLower();
+
 	TUniquePtr<FHttpServerResponse> Captured;
 	FHttpResultCallback Cb = [&Captured](TUniquePtr<FHttpServerResponse>&& Resp)
 	{
 		Captured = MoveTemp(Resp);
 	};
 
-	if (ToolName == TEXT("project.get_directory")) { HandleTool_ProjectGetDirectory(Cb); }
-	else if (ToolName == TEXT("project.get_name")) { HandleTool_ProjectGetName(Cb); }
-	else if (ToolName == TEXT("editor.get_selected_actors")) { HandleTool_EditorGetSelectedActors(Cb); }
-	else if (ToolName == TEXT("editor.get_world_info")) { HandleTool_EditorGetWorldInfo(Cb); }
-	else if (ToolName == TEXT("editor.get_selected_actor_details")) { HandleTool_EditorGetSelectedActorDetails(Cb); }
-	else if (ToolName == TEXT("editor.create_blueprint_from_selected_actor")) { HandleTool_EditorCreateBlueprintFromSelectedActor(Input, Cb); }
-	else if (ToolName == TEXT("editor.set_selected_skeletal_animation")) { HandleTool_EditorSetSelectedSkeletalAnimation(Input, Cb); }
-	else if (ToolName == TEXT("level.save_current")) { HandleTool_LevelSaveCurrent(Cb); }
-	else if (ToolName == TEXT("level.spawn_actor")) { HandleTool_LevelSpawnActor(Input, Cb); }
-	else if (ToolName == TEXT("asset.search")) { HandleTool_AssetSearch(Input, Cb); }
-	else if (ToolName == TEXT("asset.create_blueprint")) { HandleTool_AssetCreateBlueprint(Input, Cb); }
-	else if (ToolName == TEXT("blueprint.get_graph_t3d")) { HandleTool_BlueprintGetGraphT3D(Input, Cb); }
-	else if (ToolName == TEXT("blueprint.paste_t3d")) { HandleTool_BlueprintPasteT3D(Input, Cb); }
-	else if (ToolName == TEXT("umg.create_widget_blueprint")) { HandleTool_UmgCreateWidgetBlueprint(Input, Cb); }
-	else if (ToolName == TEXT("umg.add_widget")) { HandleTool_UmgAddWidget(Input, Cb); }
-	else if (ToolName == TEXT("umg.set_text")) { HandleTool_UmgSetText(Input, Cb); }
-	else if (ToolName == TEXT("umg.set_properties")) { HandleTool_UmgSetProperties(Input, Cb); }
-	else if (ToolName == TEXT("umg.scaffold_layout")) { HandleTool_UmgScaffoldLayout(Input, Cb); }
-	else if (ToolName == TEXT("umg.bind_event")) { HandleTool_UmgBindEvent(Input, Cb); }
-	else if (ToolName == TEXT("umg.bind_property")) { HandleTool_UmgBindProperty(Input, Cb); }
-	else if (ToolName == TEXT("umg.unbind")) { HandleTool_UmgUnbind(Input, Cb); }
-	else if (ToolName == TEXT("umg.list_widgets")) { HandleTool_UmgListWidgets(Input, Cb); }
-	else if (ToolName == TEXT("umg.compile")) { HandleTool_UmgCompile(Input, Cb); }
+	if (ToolKey == TEXT("project.get_directory")) { HandleTool_ProjectGetDirectory(Cb); }
+	else if (ToolKey == TEXT("project.get_name")) { HandleTool_ProjectGetName(Cb); }
+	else if (ToolKey == TEXT("editor.get_selected_actors")) { HandleTool_EditorGetSelectedActors(Cb); }
+	else if (ToolKey == TEXT("editor.get_world_info")) { HandleTool_EditorGetWorldInfo(Cb); }
+	else if (ToolKey == TEXT("editor.get_selected_actor_details")) { HandleTool_EditorGetSelectedActorDetails(Cb); }
+	else if (ToolKey == TEXT("editor.create_blueprint_from_selected_actor")) { HandleTool_EditorCreateBlueprintFromSelectedActor(Input, Cb); }
+	else if (ToolKey == TEXT("editor.set_selected_skeletal_animation")) { HandleTool_EditorSetSelectedSkeletalAnimation(Input, Cb); }
+	else if (ToolKey == TEXT("level.save_current")) { HandleTool_LevelSaveCurrent(Cb); }
+	else if (ToolKey == TEXT("level.spawn_actor")) { HandleTool_LevelSpawnActor(Input, Cb); }
+	else if (ToolKey == TEXT("asset.search")) { HandleTool_AssetSearch(Input, Cb); }
+	else if (ToolKey == TEXT("asset.create_blueprint")) { HandleTool_AssetCreateBlueprint(Input, Cb); }
+	else if (ToolKey == TEXT("blueprint.get_graph_t3d")) { HandleTool_BlueprintGetGraphT3D(Input, Cb); }
+	else if (ToolKey == TEXT("blueprint.paste_t3d")) { HandleTool_BlueprintPasteT3D(Input, Cb); }
+	else if (ToolKey == TEXT("umg.create_widget_blueprint")) { HandleTool_UmgCreateWidgetBlueprint(Input, Cb); }
+	else if (ToolKey == TEXT("umg.add_widget")) { HandleTool_UmgAddWidget(Input, Cb); }
+	else if (ToolKey == TEXT("umg.set_text")) { HandleTool_UmgSetText(Input, Cb); }
+	else if (ToolKey == TEXT("umg.set_properties")) { HandleTool_UmgSetProperties(Input, Cb); }
+	else if (ToolKey == TEXT("umg.scaffold_layout")) { HandleTool_UmgScaffoldLayout(Input, Cb); }
+	else if (ToolKey == TEXT("umg.bind_event")) { HandleTool_UmgBindEvent(Input, Cb); }
+	else if (ToolKey == TEXT("umg.bind_property")) { HandleTool_UmgBindProperty(Input, Cb); }
+	else if (ToolKey == TEXT("umg.unbind")) { HandleTool_UmgUnbind(Input, Cb); }
+	else if (ToolKey == TEXT("umg.list_widgets")) { HandleTool_UmgListWidgets(Input, Cb); }
+	else if (ToolKey == TEXT("umg.compile")) { HandleTool_UmgCompile(Input, Cb); }
 	else
 	{
 		auto Err = MakeShared<FJsonObject>();
