@@ -67,6 +67,11 @@
 #include "Animation/AnimationAsset.h"
 #include "Animation/AnimBlueprint.h"
 #include "Animation/AnimSequence.h"
+#include "Factories/AnimBlueprintFactory.h"
+
+#include "AnimGraphNode_Root.h"
+#include "AnimGraphNode_SequencePlayer.h"
+#include "AnimGraphNode_BlendListByBool.h"
 #include "Animation/Skeleton.h"
 #include "Engine/SkeletalMeshSocket.h"
 
@@ -1723,6 +1728,14 @@ public:
 			auto PreferProp = MakeShared<FJsonObject>();
 			PreferProp->SetStringField(TEXT("type"), TEXT("boolean"));
 			Props->SetObjectField(TEXT("preferExistingAnimBP"), PreferProp);
+
+			auto CreateProp = MakeShared<FJsonObject>();
+			CreateProp->SetStringField(TEXT("type"), TEXT("boolean"));
+			Props->SetObjectField(TEXT("createIfMissing"), CreateProp);
+
+			auto OutFolderProp = MakeShared<FJsonObject>();
+			OutFolderProp->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("outputFolder"), OutFolderProp);
 
 			Schema->SetObjectField(TEXT("properties"), Props);
 			OutTools.Add(MakeTool(TEXT("anim.setup_locomotion_for_selected_actor"), TEXT("Auto-assign locomotion animation: prefer an existing AnimBP for the selected Character's skeleton, otherwise pick a best-match idle/walk animation asset."), Schema));
@@ -3592,6 +3605,14 @@ bool FUEAgentBridgeModule::HandleTools(const FHttpServerRequest& Request, const 
 		auto PreferProp = MakeShared<FJsonObject>();
 		PreferProp->SetStringField(TEXT("type"), TEXT("boolean"));
 		Props->SetObjectField(TEXT("preferExistingAnimBP"), PreferProp);
+
+		auto CreateProp = MakeShared<FJsonObject>();
+		CreateProp->SetStringField(TEXT("type"), TEXT("boolean"));
+		Props->SetObjectField(TEXT("createIfMissing"), CreateProp);
+
+		auto OutFolderProp = MakeShared<FJsonObject>();
+		OutFolderProp->SetStringField(TEXT("type"), TEXT("string"));
+		Props->SetObjectField(TEXT("outputFolder"), OutFolderProp);
 
 		Schema->SetObjectField(TEXT("properties"), Props);
 		Tool->SetObjectField(TEXT("inputSchema"), Schema);
@@ -6748,16 +6769,229 @@ static int32 ScoreNameForKeywords(const FString& NameLower, const TArray<FString
 	return Score;
 }
 
+static UEdGraphPin* FindFirstPinByCategory(UEdGraphNode* Node, EEdGraphPinDirection Dir, const FString& Category, const FString& NameContains = FString())
+{
+	if (!Node)
+	{
+		return nullptr;
+	}
+
+	for (UEdGraphPin* Pin : Node->Pins)
+	{
+		if (!Pin || Pin->Direction != Dir)
+		{
+			continue;
+		}
+
+		if (!Category.IsEmpty() && Pin->PinType.PinCategory.ToString() != Category)
+		{
+			continue;
+		}
+
+		if (!NameContains.IsEmpty() && !Pin->PinName.ToString().Contains(NameContains, ESearchCase::IgnoreCase))
+		{
+			continue;
+		}
+
+		return Pin;
+	}
+
+	return nullptr;
+}
+
+static UEdGraph* FindAnyGraphByName(UBlueprint* BP, const FString& GraphName)
+{
+	if (!BP)
+	{
+		return nullptr;
+	}
+
+	TArray<UEdGraph*> Graphs;
+	BP->GetAllGraphs(Graphs);
+	for (UEdGraph* G : Graphs)
+	{
+		if (G && G->GetName() == GraphName)
+		{
+			return G;
+		}
+	}
+	return nullptr;
+}
+
+static bool EnsureAnimBPVariables(UAnimBlueprint* ABP)
+{
+	if (!ABP)
+	{
+		return false;
+	}
+
+	auto EnsureVar = [ABP](const FName& Name, const FEdGraphPinType& Type)
+	{
+		if (FBlueprintEditorUtils::FindNewVariableIndex(ABP, Name) != INDEX_NONE)
+		{
+			return true;
+		}
+		return FBlueprintEditorUtils::AddMemberVariable(ABP, Name, Type, FString());
+	};
+
+	FEdGraphPinType FloatType;
+	FloatType.PinCategory = UEdGraphSchema_K2::PC_Float;
+	FEdGraphPinType BoolType;
+	BoolType.PinCategory = UEdGraphSchema_K2::PC_Boolean;
+
+	return EnsureVar(TEXT("Speed"), FloatType) && EnsureVar(TEXT("bIsMoving"), BoolType);
+}
+
+static bool BuildSimpleLocomotionAnimGraph(UAnimBlueprint* ABP, UAnimSequence* Idle, UAnimSequence* Move)
+{
+	if (!ABP)
+	{
+		return false;
+	}
+
+	UEdGraph* AnimGraph = FindAnyGraphByName(ABP, TEXT("AnimGraph"));
+	if (!AnimGraph)
+	{
+		return false;
+	}
+
+	ABP->Modify();
+	AnimGraph->Modify();
+
+	UAnimGraphNode_Root* RootNode = nullptr;
+	for (UEdGraphNode* N : AnimGraph->Nodes)
+	{
+		RootNode = Cast<UAnimGraphNode_Root>(N);
+		if (RootNode)
+		{
+			break;
+		}
+	}
+	if (!RootNode)
+	{
+		FGraphNodeCreator<UAnimGraphNode_Root> Creator(*AnimGraph);
+		RootNode = Creator.CreateNode();
+		RootNode->NodePosX = 600;
+		RootNode->NodePosY = 0;
+		RootNode->AllocateDefaultPins();
+		Creator.Finalize();
+	}
+
+	// Create sequence players
+	UAnimGraphNode_SequencePlayer* IdleNode = nullptr;
+	UAnimGraphNode_SequencePlayer* MoveNode = nullptr;
+	UAnimGraphNode_BlendListByBool* BlendNode = nullptr;
+	UK2Node_VariableGet* BoolGet = nullptr;
+
+	{
+		FGraphNodeCreator<UAnimGraphNode_SequencePlayer> Creator(*AnimGraph);
+		IdleNode = Creator.CreateNode();
+		IdleNode->NodePosX = 0;
+		IdleNode->NodePosY = -120;
+		IdleNode->AllocateDefaultPins();
+		if (Idle)
+		{
+			IdleNode->SetAnimationAsset(Idle);
+		}
+		Creator.Finalize();
+	}
+
+	{
+		FGraphNodeCreator<UAnimGraphNode_SequencePlayer> Creator(*AnimGraph);
+		MoveNode = Creator.CreateNode();
+		MoveNode->NodePosX = 0;
+		MoveNode->NodePosY = 120;
+		MoveNode->AllocateDefaultPins();
+		if (Move)
+		{
+			MoveNode->SetAnimationAsset(Move);
+		}
+		Creator.Finalize();
+	}
+
+	{
+		FGraphNodeCreator<UAnimGraphNode_BlendListByBool> Creator(*AnimGraph);
+		BlendNode = Creator.CreateNode();
+		BlendNode->NodePosX = 320;
+		BlendNode->NodePosY = 0;
+		BlendNode->AllocateDefaultPins();
+		Creator.Finalize();
+	}
+
+	{
+		FGraphNodeCreator<UK2Node_VariableGet> Creator(*AnimGraph);
+		BoolGet = Creator.CreateNode();
+		BoolGet->NodePosX = 140;
+		BoolGet->NodePosY = 260;
+		BoolGet->VariableReference.SetSelfMember(TEXT("bIsMoving"));
+		BoolGet->AllocateDefaultPins();
+		Creator.Finalize();
+	}
+
+	const UEdGraphSchema* Schema = AnimGraph->GetSchema();
+	if (!Schema || !RootNode || !BlendNode || !IdleNode || !MoveNode || !BoolGet)
+	{
+		return false;
+	}
+
+	// Pins
+	UEdGraphPin* RootInPose = FindFirstPinByCategory(RootNode, EGPD_Input, TEXT("Pose"));
+	UEdGraphPin* BlendOutPose = FindFirstPinByCategory(BlendNode, EGPD_Output, TEXT("Pose"));
+
+	UEdGraphPin* IdleOutPose = FindFirstPinByCategory(IdleNode, EGPD_Output, TEXT("Pose"));
+	UEdGraphPin* MoveOutPose = FindFirstPinByCategory(MoveNode, EGPD_Output, TEXT("Pose"));
+
+	UEdGraphPin* BlendInFalsePose = FindFirstPinByCategory(BlendNode, EGPD_Input, TEXT("Pose"), TEXT("False"));
+	UEdGraphPin* BlendInTruePose = FindFirstPinByCategory(BlendNode, EGPD_Input, TEXT("Pose"), TEXT("True"));
+	if (!BlendInFalsePose || !BlendInTruePose)
+	{
+		// Fallback: take first two pose input pins in order.
+		TArray<UEdGraphPin*> PoseInputs;
+		for (UEdGraphPin* P : BlendNode->Pins)
+		{
+			if (P && P->Direction == EGPD_Input && P->PinType.PinCategory.ToString() == TEXT("Pose"))
+			{
+				PoseInputs.Add(P);
+			}
+		}
+		if (PoseInputs.Num() >= 2)
+		{
+			BlendInFalsePose = PoseInputs[0];
+			BlendInTruePose = PoseInputs[1];
+		}
+	}
+
+	UEdGraphPin* BlendInBool = FindFirstPinByCategory(BlendNode, EGPD_Input, TEXT("bool"));
+	UEdGraphPin* BoolOut = FindFirstPinByCategory(BoolGet, EGPD_Output, TEXT("bool"));
+
+	if (!RootInPose || !BlendOutPose || !IdleOutPose || !MoveOutPose || !BlendInFalsePose || !BlendInTruePose || !BlendInBool || !BoolOut)
+	{
+		return false;
+	}
+
+	Schema->TryCreateConnection(BlendOutPose, RootInPose);
+	Schema->TryCreateConnection(IdleOutPose, BlendInFalsePose);
+	Schema->TryCreateConnection(MoveOutPose, BlendInTruePose);
+	Schema->TryCreateConnection(BoolOut, BlendInBool);
+
+	FBlueprintEditorUtils::MarkBlueprintAsModified(ABP);
+	return true;
+}
+
 bool FUEAgentBridgeModule::HandleTool_AnimSetupLocomotionForSelectedActor(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
 {
 	auto Out = MakeShared<FJsonObject>();
 
 	FString PackagePath = TEXT("/Game");
 	bool bPreferExistingAnimBP = true;
+	bool bCreateIfMissing = true;
+	FString OutputFolder = TEXT("/Game/test");
 	if (Input.IsValid())
 	{
 		Input->TryGetStringField(TEXT("packagePath"), PackagePath);
 		Input->TryGetBoolField(TEXT("preferExistingAnimBP"), bPreferExistingAnimBP);
+		Input->TryGetBoolField(TEXT("createIfMissing"), bCreateIfMissing);
+		Input->TryGetStringField(TEXT("outputFolder"), OutputFolder);
 	}
 	if (PackagePath.IsEmpty())
 	{
@@ -6905,6 +7139,173 @@ bool FUEAgentBridgeModule::HandleTool_AnimSetupLocomotionForSelectedActor(const 
 			}
 		}
 
+		// If missing an AnimBP, optionally create a very simple locomotion AnimBP (idle vs move) and apply it.
+		if (bCreateIfMissing && (BestIdle || BestWalk))
+		{
+			const FString Folder = NormalizeGameFolder(OutputFolder);
+			const FString ABPPath = JoinAssetPath(Folder, TEXT("ABP_AutoLocomotion"));
+
+			UAnimBlueprint* ABP = LoadObject<UAnimBlueprint>(nullptr, *ABPPath);
+			if (!ABP)
+			{
+				UAnimBlueprintFactory* Factory = NewObject<UAnimBlueprintFactory>();
+				Factory->TargetSkeleton = Skeleton;
+				Factory->ParentClass = UAnimInstance::StaticClass();
+
+				FString Err;
+				UObject* Asset = CreateAssetWithFactory(ABPPath, UAnimBlueprint::StaticClass(), Factory, Err);
+				ABP = Cast<UAnimBlueprint>(Asset);
+			}
+
+			if (ABP)
+			{
+				EnsureAnimBPVariables(ABP);
+				BuildSimpleLocomotionAnimGraph(ABP, BestIdle, BestWalk ? BestWalk : BestIdle);
+
+				// Build a simple UpdateAnimation event graph: Speed + bIsMoving
+				UEdGraph* EventGraph = FindBlueprintGraph(ABP, TEXT("EventGraph"));
+				if (EventGraph)
+				{
+					ABP->Modify();
+					EventGraph->Modify();
+
+					// Event: BlueprintUpdateAnimation
+					FGraphNodeCreator<UK2Node_Event> ECreator(*EventGraph);
+					UK2Node_Event* UpdateEvt = ECreator.CreateNode();
+					UpdateEvt->NodePosX = 0;
+					UpdateEvt->NodePosY = 0;
+					UpdateEvt->EventReference.SetExternalMember(FName(TEXT("BlueprintUpdateAnimation")), UAnimInstance::StaticClass());
+					UpdateEvt->bOverrideFunction = true;
+					UpdateEvt->AllocateDefaultPins();
+					ECreator.Finalize();
+
+					auto AddCall = [EventGraph, ABP](const FString& ClassPath, const FString& FuncName, int32 X, int32 Y) -> UK2Node_CallFunction*
+					{
+						UClass* Cls = StaticLoadClass(UObject::StaticClass(), nullptr, *ClassPath);
+						if (!Cls) { return nullptr; }
+						UFunction* Func = Cls->FindFunctionByName(FName(*FuncName));
+						if (!Func) { return nullptr; }
+
+						FGraphNodeCreator<UK2Node_CallFunction> Creator(*EventGraph);
+						UK2Node_CallFunction* Node = Creator.CreateNode();
+						Node->NodePosX = X;
+						Node->NodePosY = Y;
+						Node->SetFromFunction(Func);
+						Node->AllocateDefaultPins();
+						Creator.Finalize();
+						return Node;
+					};
+
+					auto AddVarSet = [EventGraph](const FName& VarName, int32 X, int32 Y) -> UK2Node_VariableSet*
+					{
+						FGraphNodeCreator<UK2Node_VariableSet> Creator(*EventGraph);
+						UK2Node_VariableSet* Node = Creator.CreateNode();
+						Node->NodePosX = X;
+						Node->NodePosY = Y;
+						Node->VariableReference.SetSelfMember(VarName);
+						Node->AllocateDefaultPins();
+						Creator.Finalize();
+						return Node;
+					};
+
+					UK2Node_ExecutionSequence* SeqNode = nullptr;
+					{
+						FGraphNodeCreator<UK2Node_ExecutionSequence> Creator(*EventGraph);
+						SeqNode = Creator.CreateNode();
+						SeqNode->NodePosX = 220;
+						SeqNode->NodePosY = 0;
+						SeqNode->AllocateDefaultPins();
+						Creator.Finalize();
+					}
+
+					UK2Node_CallFunction* TryGetPawnOwner = AddCall(TEXT("/Script/Engine.AnimInstance"), TEXT("TryGetPawnOwner"), 220, 120);
+					UK2Node_CallFunction* GetVelocity = AddCall(TEXT("/Script/Engine.Actor"), TEXT("GetVelocity"), 440, 120);
+					UK2Node_CallFunction* VSize = AddCall(TEXT("/Script/Engine.KismetMathLibrary"), TEXT("VSize"), 660, 120);
+					UK2Node_CallFunction* Greater = AddCall(TEXT("/Script/Engine.KismetMathLibrary"), TEXT("Greater_FloatFloat"), 660, 260);
+
+					UK2Node_VariableSet* SetSpeed = AddVarSet(TEXT("Speed"), 880, 80);
+					UK2Node_VariableSet* SetMoving = AddVarSet(TEXT("bIsMoving"), 880, 240);
+
+					const UEdGraphSchema* Schema = EventGraph->GetSchema();
+					if (Schema && UpdateEvt && SeqNode && TryGetPawnOwner && GetVelocity && VSize && Greater && SetSpeed && SetMoving)
+					{
+						auto Pin = [](UEdGraphNode* N, const FString& Name) { return FindPinByName(N, Name); };
+
+						// Exec flow: Update -> Sequence -> SetSpeed / SetMoving
+						if (Pin(UpdateEvt, TEXT("then")) && Pin(SeqNode, TEXT("execute")))
+						{
+							Schema->TryCreateConnection(Pin(UpdateEvt, TEXT("then")), Pin(SeqNode, TEXT("execute")));
+						}
+						if (Pin(SeqNode, TEXT("then_0")) && Pin(SetSpeed, TEXT("execute")))
+						{
+							Schema->TryCreateConnection(Pin(SeqNode, TEXT("then_0")), Pin(SetSpeed, TEXT("execute")));
+						}
+						if (Pin(SeqNode, TEXT("then_1")) && Pin(SetMoving, TEXT("execute")))
+						{
+							Schema->TryCreateConnection(Pin(SeqNode, TEXT("then_1")), Pin(SetMoving, TEXT("execute")));
+						}
+
+						// PawnOwner -> GetVelocity.Target
+						if (Pin(TryGetPawnOwner, TEXT("ReturnValue")) && Pin(GetVelocity, TEXT("Target")))
+						{
+							Schema->TryCreateConnection(Pin(TryGetPawnOwner, TEXT("ReturnValue")), Pin(GetVelocity, TEXT("Target")));
+						}
+						// Velocity -> VSize.A
+						if (Pin(GetVelocity, TEXT("ReturnValue")) && Pin(VSize, TEXT("A")))
+						{
+							Schema->TryCreateConnection(Pin(GetVelocity, TEXT("ReturnValue")), Pin(VSize, TEXT("A")));
+						}
+						// SpeedValue -> SetSpeed.Speed
+						if (Pin(VSize, TEXT("ReturnValue")) && Pin(SetSpeed, TEXT("Speed")))
+						{
+							Schema->TryCreateConnection(Pin(VSize, TEXT("ReturnValue")), Pin(SetSpeed, TEXT("Speed")));
+						}
+
+						// SpeedValue -> Greater.A
+						if (Pin(VSize, TEXT("ReturnValue")) && Pin(Greater, TEXT("A")))
+						{
+							Schema->TryCreateConnection(Pin(VSize, TEXT("ReturnValue")), Pin(Greater, TEXT("A")));
+						}
+						if (UEdGraphPin* BPin = Pin(Greater, TEXT("B")))
+						{
+							Schema->TrySetDefaultValue(*BPin, TEXT("3.0"));
+						}
+						if (Pin(Greater, TEXT("ReturnValue")) && Pin(SetMoving, TEXT("bIsMoving")))
+						{
+							Schema->TryCreateConnection(Pin(Greater, TEXT("ReturnValue")), Pin(SetMoving, TEXT("bIsMoving")));
+						}
+					}
+
+					FBlueprintEditorUtils::MarkBlueprintAsModified(ABP);
+				}
+
+				FKismetEditorUtilities::CompileBlueprint(ABP);
+				if (UPackage* Package = ABP->GetOutermost())
+				{
+					Package->MarkPackageDirty();
+				}
+
+				if (ABP->GeneratedClass)
+				{
+					const FString AnimBPClassPath = ABP->GeneratedClass->GetPathName();
+					TSharedPtr<FJsonObject> ApplyIn = MakeShared<FJsonObject>();
+					ApplyIn->SetStringField(TEXT("animBlueprintClassPath"), AnimBPClassPath);
+
+					TUniquePtr<FHttpServerResponse> Captured;
+					FHttpResultCallback Cb = [&Captured](TUniquePtr<FHttpServerResponse>&& Resp) { Captured = MoveTemp(Resp); };
+					HandleTool_EditorSetSelectedSkeletalAnimation(ApplyIn, Cb);
+
+					Out->SetBoolField(TEXT("ok"), true);
+					Out->SetStringField(TEXT("applied"), TEXT("animBlueprintClassPath"));
+					Out->SetStringField(TEXT("value"), AnimBPClassPath);
+					Out->SetStringField(TEXT("createdAnimBP"), ABPPath);
+					OnComplete(JsonResponse(Out, 200));
+					return true;
+				}
+			}
+		}
+
+		// If we didn't create an AnimBP, fall back to applying a single looping animation asset.
 		UAnimSequence* Chosen = BestIdle ? BestIdle : BestWalk;
 		if (Chosen)
 		{
@@ -6919,10 +7320,7 @@ bool FUEAgentBridgeModule::HandleTool_AnimSetupLocomotionForSelectedActor(const 
 			Out->SetBoolField(TEXT("ok"), true);
 			Out->SetStringField(TEXT("applied"), TEXT("animationAssetPath"));
 			Out->SetStringField(TEXT("value"), AnimPath);
-			if (!BestIdle)
-			{
-				Out->SetStringField(TEXT("warning"), TEXT("No matching AnimBlueprint found; applied a single looping animation asset. For full locomotion, add/choose an AnimBP for this skeleton."));
-			}
+			Out->SetStringField(TEXT("warning"), TEXT("Applied a single looping animation asset. For locomotion, enable createIfMissing or add/choose an AnimBP for this skeleton."));
 			OnComplete(JsonResponse(Out, 200));
 			return true;
 		}

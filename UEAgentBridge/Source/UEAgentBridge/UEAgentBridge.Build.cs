@@ -23,6 +23,7 @@ public class UEAgentBridge : ModuleRules
 				"AIModule",
 				"NavigationSystem",
 				"BehaviorTreeEditor",
+				"AnimGraph",
 				"BlueprintGraph",
 				"Kismet",
 				"KismetCompiler",
