@@ -11,7 +11,7 @@
 
 انسخ هذا المجلد إلى مشروعك:
 
-`ue-agent/unreal/UEAgentBridge` → `<YourProject>/Plugins/UEAgentBridge`
+`UEAgentBridge` → `<YourProject>/Plugins/UEAgentBridge`
 
 ثم فعّل الإضافة من:
 
@@ -44,7 +44,7 @@ Editor plugin that provides:
 
 Copy this folder into your project:
 
-`ue-agent/unreal/UEAgentBridge` → `<YourProject>/Plugins/UEAgentBridge`
+`UEAgentBridge` → `<YourProject>/Plugins/UEAgentBridge`
 
 Enable it in:
 
@@ -63,5 +63,6 @@ Environment variables (optional):
 - `GET /ue-agent/health`
 - `GET /ue-agent/tools`
 - `POST /ue-agent/tools/call`
+
 
 

@@ -1,7 +1,0 @@
-{
-  "example_local_tools": {
-    "command": "node",
-    "args": ["-e", "console.log('Replace this with a real MCP server command')"]
-  }
-}
-

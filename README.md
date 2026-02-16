@@ -18,7 +18,7 @@
 
 انسخ:
 
-`ue-agent/unreal/UEAgentBridge` → `<YourProject>/Plugins/UEAgentBridge`
+`UEAgentBridge` → `<YourProject>/Plugins/UEAgentBridge`
 
 ثم افتح المشروع وفعّل الإضافة من:
 
@@ -88,7 +88,7 @@
 
 Copy:
 
-`ue-agent/unreal/UEAgentBridge` → `<YourProject>/Plugins/UEAgentBridge`
+`UEAgentBridge` → `<YourProject>/Plugins/UEAgentBridge`
 
 Then enable in:
 
@@ -114,5 +114,6 @@ In the `Settings` page:
 Saved per project at:
 
 `<Project>/Saved/UEAgentBridge/conversations.json`
+
 
 
