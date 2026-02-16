@@ -179,12 +179,15 @@ static FString GetAgentSystemPrompt()
 		"- umg.bind_event, umg.bind_property, umg.unbind, umg.list_widgets, umg.compile\n"
 		"\n"
 		"Protocol:\n"
-		"- You may respond with normal text.\n"
+		"- When the user asks you to DO something in the editor, you must keep working until it is done.\n"
+		"- Do NOT ask the user to confirm each step. Do NOT wait for the user between steps.\n"
+		"- Only ask a question if you are truly blocked and cannot safely proceed.\n"
+		"- Prefer tool calls over explanations. Save explanations for the very end.\n"
 		"- If you need a tool, respond with ONLY a single JSON object:\n"
 		"  {\"type\":\"tool_call\",\"toolName\":\"...\",\"input\":{...}}\n"
 		"- After a tool call, you will receive a user message containing JSON:\n"
 		"  {\"type\":\"tool_result\",\"toolName\":\"...\",\"statusCode\":200,\"body\":{...}}\n"
-		"- If you are done and no more tools are needed, respond with normal text.\n"
+		"- When you are done and no more tools are needed, respond with normal text summarizing what you did (step-by-step).\n"
 		"\n"
 		"Guidelines:\n"
 		"- The user may write Arabic; reply in the user's language.\n"
@@ -1596,6 +1599,14 @@ public:
 				RefreshConversationList();
 				SaveConversations();
 			}
+
+			// If we are in an execution loop, keep going without requiring user input.
+			if (StepsRemaining > 0)
+			{
+				AgentStep();
+				return;
+			}
+
 			bBusy = false;
 			return;
 		}
