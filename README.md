@@ -6,6 +6,14 @@
 
 الفكرة: اربط الإضافة مع **أي مزوّد/نموذج** يدعم واجهة **OpenAI-compatible** (أو اختر Preset جاهز)، ثم اكتب أوامر نصية لتنفيذ مهام داخل المحرر.
 
+### معلومات التواصل
+
+- برمجة
+- الاسم: حسن الحو
+- الموقع: سوريا — دمشق
+- X555
+- ديسكورد: `X555#5266`
+
 ### التركيب
 
 1) انسخ مجلد `UEAgentBridge` إلى مشروعك:
@@ -83,14 +91,6 @@
 
 الجسر مصمم للاستخدام المحلي فقط (`localhost`). لا تفتحه على الشبكة ولا تشارك مفاتيح API.
 
-### معلومات التواصل
-
-- برمجة
-- الاسم: حسن الحو
-- الموقع: سوريا — دمشق
-- X555
-- ديسكورد: `X555#5266`
-
 ---
 
 ## English
@@ -98,6 +98,14 @@
 `UEAgentBridge` is an Unreal Editor plugin.
 
 Idea: connect it to **any provider/model** that supports an **OpenAI-compatible** API (or pick a preset), then write natural-language requests to perform actions inside the editor.
+
+### Contact
+
+- Programming
+- Name: Hassan Al-Hou
+- Location: Damascus, Syria
+- X555
+- Discord: `X555#5266`
 
 ### Install
 
@@ -162,13 +170,5 @@ For deterministic Blueprint graph editing and AI assets:
 This is a C++ editor plugin. Unreal must compile it at least once to match your exact engine version (e.g. 5.7.2) and platform. Many Marketplace plugins either:
 - are Blueprint-only (no compilation), or
 - ship with prebuilt `Binaries` for the same engine version/platform.
-
-### Contact
-
-- Programming
-- Name: Hassan Al-Hou
-- Location: Damascus, Syria
-- X555
-- Discord: `X555#5266`
 
 
