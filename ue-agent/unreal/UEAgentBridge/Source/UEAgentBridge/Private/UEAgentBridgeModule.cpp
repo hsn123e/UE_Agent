@@ -13,13 +13,13 @@
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Layout/SSplitter.h"
+#include "Widgets/Layout/SWidgetSwitcher.h"
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Layout/SSeparator.h"
 #include "Widgets/Input/SComboBox.h"
-#include "Widgets/SWindow.h"
 #include "Widgets/Views/SListView.h"
 #include "Widgets/Views/STableRow.h"
 
@@ -185,6 +185,11 @@ static FString GetAgentSystemPrompt()
 		"- After a tool call, you will receive a user message containing JSON:\n"
 		"  {\"type\":\"tool_result\",\"toolName\":\"...\",\"statusCode\":200,\"body\":{...}}\n"
 		"- If you are done and no more tools are needed, respond with normal text.\n"
+		"\n"
+		"Guidelines:\n"
+		"- The user may write Arabic; reply in the user's language.\n"
+		"- If the user refers to the selected actor, call editor.get_selected_actors or editor.get_selected_actor_details first.\n"
+		"- asset.search defaults to /Game when packagePath is omitted.\n"
 	);
 }
 
@@ -206,10 +211,7 @@ public:
 		MaxSteps = Settings->MaxSteps;
 		Temperature = Settings->Temperature;
 
-		ProviderOptions.Reset();
-		ProviderOptions.Add(MakeShared<FString>(TEXT("OpenAI-compatible")));
-		ProviderOptions.Add(MakeShared<FString>(TEXT("Ollama Cloud")));
-		SelectedProviderLabel = Provider == EUEAgentProvider::OllamaCloud ? ProviderOptions[1] : ProviderOptions[0];
+		InitProviderPresets();
 
 		LoadConversations();
 		if (Conversations.Num() == 0)
@@ -301,8 +303,26 @@ public:
 				{
 					continue;
 				}
-				const FString Prefix = (M.Role == TEXT("assistant")) ? TEXT("[assistant] ") : TEXT("[user] ");
-				AppendTranscript(Prefix + M.Content);
+				if (M.Role == TEXT("assistant"))
+				{
+					AppendTranscript(TEXT("[assistant] ") + M.Content);
+					continue;
+				}
+
+				// Render tool_result messages nicely (they are stored as "user" role for the agent loop)
+				TSharedPtr<FJsonObject> Obj;
+				FString Type;
+				if (TryParseJsonObject(M.Content, Obj) && Obj.IsValid() && Obj->TryGetStringField(TEXT("type"), Type) && Type.Equals(TEXT("tool_result"), ESearchCase::IgnoreCase))
+				{
+					FString ToolName;
+					Obj->TryGetStringField(TEXT("toolName"), ToolName);
+					double Status = 0;
+					Obj->TryGetNumberField(TEXT("statusCode"), Status);
+					AppendTranscript(FString::Printf(TEXT("[tool_result] %s (http %d)"), *ToolName, (int32)Status));
+					continue;
+				}
+
+				AppendTranscript(TEXT("[user] ") + M.Content);
 			}
 		}
 	}
@@ -499,6 +519,326 @@ public:
 		}
 	}
 
+	struct FProviderPreset
+	{
+		FString Label;
+		EUEAgentProvider Provider = EUEAgentProvider::OpenAICompatible;
+		FString BaseUrl;
+		bool bAllowEditBaseUrl = false;
+		TArray<FString> SuggestedModels;
+	};
+
+	void InitProviderPresets()
+	{
+		ProviderPresets.Reset();
+
+		// Ollama Cloud (native /chat endpoint)
+		{
+			FProviderPreset P;
+			P.Label = TEXT("Ollama Cloud");
+			P.Provider = EUEAgentProvider::OllamaCloud;
+			P.BaseUrl = TEXT("https://ollama.com/api");
+			P.bAllowEditBaseUrl = false;
+			P.SuggestedModels = { TEXT("gpt-oss:120b") };
+			ProviderPresets.Add(MoveTemp(P));
+		}
+
+		// OpenAI-compatible presets (common providers)
+		auto AddOpenAICompat = [this](const FString& Label, const FString& Url, const TArray<FString>& Models)
+		{
+			FProviderPreset P;
+			P.Label = Label;
+			P.Provider = EUEAgentProvider::OpenAICompatible;
+			P.BaseUrl = Url;
+			P.bAllowEditBaseUrl = false;
+			P.SuggestedModels = Models;
+			ProviderPresets.Add(MoveTemp(P));
+		};
+
+		AddOpenAICompat(TEXT("OpenAI"), TEXT("https://api.openai.com/v1"), { TEXT("gpt-4o-mini"), TEXT("gpt-4.1-mini") });
+		AddOpenAICompat(TEXT("OpenRouter"), TEXT("https://openrouter.ai/api/v1"), {});
+		AddOpenAICompat(TEXT("Groq"), TEXT("https://api.groq.com/openai/v1"), {});
+		AddOpenAICompat(TEXT("Together"), TEXT("https://api.together.xyz/v1"), {});
+		AddOpenAICompat(TEXT("Fireworks"), TEXT("https://api.fireworks.ai/inference/v1"), {});
+		AddOpenAICompat(TEXT("DeepInfra"), TEXT("https://api.deepinfra.com/v1/openai"), {});
+		AddOpenAICompat(TEXT("LM Studio (Local)"), TEXT("http://localhost:1234/v1"), {});
+		AddOpenAICompat(TEXT("Ollama (Local OpenAI-compatible)"), TEXT("http://localhost:11434/v1"), {});
+
+		// Custom
+		{
+			FProviderPreset P;
+			P.Label = TEXT("Custom (OpenAI-compatible)");
+			P.Provider = EUEAgentProvider::OpenAICompatible;
+			P.BaseUrl = BaseUrl.IsEmpty() ? TEXT("http://localhost:11434/v1") : BaseUrl;
+			P.bAllowEditBaseUrl = true;
+			ProviderPresets.Add(MoveTemp(P));
+		}
+
+		ProviderPresetOptions.Reset();
+		for (const FProviderPreset& P : ProviderPresets)
+		{
+			ProviderPresetOptions.Add(MakeShared<FString>(P.Label));
+		}
+
+		const int32 CustomIdx = ProviderPresets.Num() - 1;
+
+		// Choose best matching preset for current settings
+		SelectedProviderPresetLabel.Reset();
+		for (int32 i = 0; i < ProviderPresets.Num(); i++)
+		{
+			if (ProviderPresets[i].Provider == Provider && ProviderPresets[i].BaseUrl.Equals(BaseUrl, ESearchCase::IgnoreCase))
+			{
+				SelectedProviderPresetLabel = ProviderPresetOptions[i];
+				break;
+			}
+		}
+		if (!SelectedProviderPresetLabel.IsValid() && ProviderPresetOptions.Num() > 0)
+		{
+			SelectedProviderPresetLabel = ProviderPresetOptions.IsValidIndex(CustomIdx) ? ProviderPresetOptions[CustomIdx] : ProviderPresetOptions[0];
+			ApplyPresetByIndex(ProviderPresetOptions.IsValidIndex(CustomIdx) ? CustomIdx : 0);
+		}
+		else
+		{
+			const int32 SelIdx = GetSelectedPresetIndex();
+			if (SelIdx != INDEX_NONE)
+			{
+				ApplySuggestedModelsFromPreset(ProviderPresets[SelIdx]);
+			}
+		}
+	}
+
+	int32 GetSelectedPresetIndex() const
+	{
+		if (!SelectedProviderPresetLabel.IsValid())
+		{
+			return INDEX_NONE;
+		}
+		for (int32 i = 0; i < ProviderPresetOptions.Num(); i++)
+		{
+			if (ProviderPresetOptions[i] == SelectedProviderPresetLabel)
+			{
+				return i;
+			}
+		}
+		return INDEX_NONE;
+	}
+
+	void ApplySuggestedModelsFromPreset(const FProviderPreset& Preset)
+	{
+		ModelOptions.Reset();
+		for (const FString& M : Preset.SuggestedModels)
+		{
+			ModelOptions.Add(MakeShared<FString>(M));
+		}
+		if (!Model.IsEmpty())
+		{
+			ModelOptions.Insert(MakeShared<FString>(Model), 0);
+		}
+
+		SelectedModelLabel.Reset();
+		for (const TSharedPtr<FString>& Opt : ModelOptions)
+		{
+			if (Opt.IsValid() && *Opt == Model)
+			{
+				SelectedModelLabel = Opt;
+				break;
+			}
+		}
+		if (!SelectedModelLabel.IsValid() && ModelOptions.Num() > 0)
+		{
+			SelectedModelLabel = ModelOptions[0];
+		}
+		if (ModelCombo.IsValid())
+		{
+			ModelCombo->RefreshOptions();
+			if (SelectedModelLabel.IsValid())
+			{
+				ModelCombo->SetSelectedItem(SelectedModelLabel);
+			}
+		}
+	}
+
+	void ApplyPresetByIndex(int32 Index)
+	{
+		if (!ProviderPresets.IsValidIndex(Index))
+		{
+			return;
+		}
+		const FProviderPreset& P = ProviderPresets[Index];
+		Provider = P.Provider;
+		BaseUrl = P.BaseUrl;
+		if (BaseUrlBox.IsValid())
+		{
+			BaseUrlBox->SetText(FText::FromString(BaseUrl));
+		}
+		ApplySuggestedModelsFromPreset(P);
+	}
+
+	void OnProviderPresetChanged(TSharedPtr<FString> NewValue, ESelectInfo::Type)
+	{
+		SelectedProviderPresetLabel = NewValue;
+		const int32 Idx = GetSelectedPresetIndex();
+		if (Idx != INDEX_NONE)
+		{
+			ApplyPresetByIndex(Idx);
+		}
+	}
+
+	FText GetProviderPresetText() const
+	{
+		return FText::FromString(SelectedProviderPresetLabel.IsValid() ? *SelectedProviderPresetLabel : TEXT(""));
+	}
+
+	void OnModelSelected(TSharedPtr<FString> NewValue, ESelectInfo::Type)
+	{
+		SelectedModelLabel = NewValue;
+		if (NewValue.IsValid())
+		{
+			Model = *NewValue;
+			if (ModelBox.IsValid())
+			{
+				ModelBox->SetText(FText::FromString(Model));
+			}
+		}
+	}
+
+	FText GetModelText() const
+	{
+		return FText::FromString(SelectedModelLabel.IsValid() ? *SelectedModelLabel : Model);
+	}
+
+	FReply OnRefreshModelsClicked()
+	{
+		if (BaseUrlBox.IsValid())
+		{
+			BaseUrl = BaseUrlBox->GetText().ToString();
+		}
+		if (ApiKeyBox.IsValid())
+		{
+			ApiKey = ApiKeyBox->GetText().ToString();
+		}
+
+		FString Url = BaseUrl;
+		Url.TrimStartAndEndInline();
+		while (Url.EndsWith(TEXT("/")))
+		{
+			Url.LeftChopInline(1);
+		}
+
+		if (Provider == EUEAgentProvider::OllamaCloud)
+		{
+			Url += TEXT("/tags");
+		}
+		else
+		{
+			Url += TEXT("/models");
+		}
+
+		TSharedRef<IHttpRequest> Req = FHttpModule::Get().CreateRequest();
+		Req->SetVerb(TEXT("GET"));
+		Req->SetURL(Url);
+		Req->SetHeader(TEXT("Accept"), TEXT("application/json"));
+		if (!ApiKey.IsEmpty())
+		{
+			Req->SetHeader(TEXT("Authorization"), FString::Printf(TEXT("Bearer %s"), *ApiKey));
+		}
+
+		const TWeakPtr<SUEAgentBridgePanel> SelfWeak = StaticCastSharedRef<SUEAgentBridgePanel>(AsShared());
+		Req->OnProcessRequestComplete().BindLambda([SelfWeak](FHttpRequestPtr, FHttpResponsePtr Resp, bool bOk)
+		{
+			if (!SelfWeak.IsValid())
+			{
+				return;
+			}
+			SelfWeak.Pin()->OnModelsResponse(Resp, bOk);
+		});
+
+		if (!Req->ProcessRequest())
+		{
+			AppendTranscript(TEXT("[models] could not start request"));
+		}
+		return FReply::Handled();
+	}
+
+	void OnModelsResponse(FHttpResponsePtr Resp, bool bOk)
+	{
+		if (!bOk || !Resp.IsValid())
+		{
+			AppendTranscript(TEXT("[models] request failed"));
+			return;
+		}
+
+		const int32 Code = Resp->GetResponseCode();
+		if (Code < 200 || Code >= 300)
+		{
+			AppendTranscript(FString::Printf(TEXT("[models] http %d"), Code));
+			AppendTranscript(Resp->GetContentAsString().Left(2000));
+			return;
+		}
+
+		TSharedPtr<FJsonObject> Root;
+		if (!TryParseJsonObject(Resp->GetContentAsString(), Root))
+		{
+			AppendTranscript(TEXT("[models] invalid JSON"));
+			return;
+		}
+
+		TArray<FString> Names;
+		if (Provider == EUEAgentProvider::OllamaCloud)
+		{
+			const TArray<TSharedPtr<FJsonValue>>* ModelsArr = nullptr;
+			if (Root->TryGetArrayField(TEXT("models"), ModelsArr) && ModelsArr)
+			{
+				for (const TSharedPtr<FJsonValue>& V : *ModelsArr)
+				{
+					const TSharedPtr<FJsonObject> Obj = V.IsValid() ? V->AsObject() : nullptr;
+					if (!Obj.IsValid())
+					{
+						continue;
+					}
+					FString Name;
+					if (Obj->TryGetStringField(TEXT("name"), Name) && !Name.IsEmpty())
+					{
+						Names.Add(Name);
+					}
+				}
+			}
+		}
+		else
+		{
+			const TArray<TSharedPtr<FJsonValue>>* DataArr = nullptr;
+			if (Root->TryGetArrayField(TEXT("data"), DataArr) && DataArr)
+			{
+				for (const TSharedPtr<FJsonValue>& V : *DataArr)
+				{
+					const TSharedPtr<FJsonObject> Obj = V.IsValid() ? V->AsObject() : nullptr;
+					if (!Obj.IsValid())
+					{
+						continue;
+					}
+					FString Id;
+					if (Obj->TryGetStringField(TEXT("id"), Id) && !Id.IsEmpty())
+					{
+						Names.Add(Id);
+					}
+				}
+			}
+		}
+
+		Names.Sort();
+		ModelOptions.Reset();
+		for (const FString& N : Names)
+		{
+			ModelOptions.Add(MakeShared<FString>(N));
+		}
+
+		if (ModelCombo.IsValid())
+		{
+			ModelCombo->RefreshOptions();
+		}
+		AppendTranscript(FString::Printf(TEXT("[models] loaded %d models"), ModelOptions.Num()));
+	}
+
 	TSharedRef<SWidget> BuildConversationPane()
 	{
 		return SNew(SVerticalBox)
@@ -577,6 +917,20 @@ public:
 
 	TSharedRef<SWidget> BuildChatPane()
 	{
+		return SAssignNew(RightSwitcher, SWidgetSwitcher)
+			.WidgetIndex(0)
+			+ SWidgetSwitcher::Slot()
+			[
+				BuildChatMainPane()
+			]
+			+ SWidgetSwitcher::Slot()
+			[
+				BuildSettingsPane()
+			];
+	}
+
+	TSharedRef<SWidget> BuildChatMainPane()
+	{
 		return SNew(SVerticalBox)
 			+ SVerticalBox::Slot().AutoHeight()
 			[
@@ -589,7 +943,7 @@ public:
 				[
 					SNew(SButton)
 					.Text(FText::FromString(TEXT("Settings")))
-					.OnClicked(this, &SUEAgentBridgePanel::OnOpenSettingsClicked)
+					.OnClicked(this, &SUEAgentBridgePanel::OnShowSettingsClicked)
 				]
 			]
 
@@ -653,101 +1007,53 @@ public:
 				.Text(FText::FromString(TEXT("Describe")))
 				.OnClicked(this, &SUEAgentBridgePanel::OnDescribeSelectionClicked)
 			]
-			+ SHorizontalBox::Slot().AutoWidth().Padding(8, 0)
-			[
-				SNew(SButton)
-				.Text(FText::FromString(TEXT("Insert AI prompt")))
-				.OnClicked(this, &SUEAgentBridgePanel::OnInsertAIPromptClicked)
-			];
+			;
 	}
 
-	FReply OnOpenSettingsClicked()
+	FReply OnShowSettingsClicked()
 	{
-		if (SettingsWindow.IsValid())
+		if (RightSwitcher.IsValid())
 		{
-			if (TSharedPtr<SWindow> W = SettingsWindow.Pin())
-			{
-				W->BringToFront(true);
-				return FReply::Handled();
-			}
+			RightSwitcher->SetActiveWidgetIndex(1);
 		}
-
-		TSharedRef<SWindow> Win = SNew(SWindow)
-			.Title(FText::FromString(TEXT("UE Agent Settings")))
-			.ClientSize(FVector2D(760, 260))
-			.SupportsMinimize(false)
-			.SupportsMaximize(false);
-
-		SettingsWindow = Win;
-		Win->SetOnWindowClosed(FOnWindowClosed::CreateLambda([this](const TSharedRef<SWindow>&)
-		{
-			SettingsWindow.Reset();
-			BaseUrlBox.Reset();
-			ApiKeyBox.Reset();
-			ModelBox.Reset();
-			ProviderCombo.Reset();
-		}));
-
-		Win->SetContent(BuildSettingsPanel());
-		FSlateApplication::Get().AddWindow(Win);
 		return FReply::Handled();
 	}
 
-	TSharedRef<SWidget> BuildSettingsPanel()
+	FReply OnBackFromSettingsClicked()
+	{
+		if (RightSwitcher.IsValid())
+		{
+			RightSwitcher->SetActiveWidgetIndex(0);
+		}
+		return FReply::Handled();
+	}
+
+	bool CanEditBaseUrl() const
+	{
+		const int32 Idx = GetSelectedPresetIndex();
+		return Idx != INDEX_NONE && ProviderPresets.IsValidIndex(Idx) && ProviderPresets[Idx].bAllowEditBaseUrl;
+	}
+
+	TSharedRef<SWidget> BuildSettingsPane()
 	{
 		return SNew(SBorder)
-			.Padding(12)
+			.Padding(8)
 			[
 				SNew(SVerticalBox)
+
 				+ SVerticalBox::Slot().AutoHeight()
 				[
-					SNew(STextBlock).Text(FText::FromString(TEXT("Provider")))
-				]
-				+ SVerticalBox::Slot().AutoHeight().Padding(0, 4)
-				[
-					SAssignNew(ProviderCombo, SComboBox<TSharedPtr<FString>>)
-					.OptionsSource(&ProviderOptions)
-					.InitiallySelectedItem(SelectedProviderLabel)
-					.OnGenerateWidget_Lambda([](TSharedPtr<FString> Item)
-					{
-						return SNew(STextBlock).Text(FText::FromString(Item.IsValid() ? *Item : TEXT("")));
-					})
-					.OnSelectionChanged(this, &SUEAgentBridgePanel::OnProviderChanged)
-					[
-						SNew(STextBlock).Text(this, &SUEAgentBridgePanel::GetProviderText)
-					]
-				]
-
-				+ SVerticalBox::Slot().AutoHeight().Padding(0, 8)
-				[
-					SNew(STextBlock).Text(FText::FromString(TEXT("Base URL")))
-				]
-				+ SVerticalBox::Slot().AutoHeight().Padding(0, 4)
-				[
-					SAssignNew(BaseUrlBox, SEditableTextBox).Text(FText::FromString(BaseUrl))
-				]
-
-				+ SVerticalBox::Slot().AutoHeight().Padding(0, 8)
-				[
-					SNew(STextBlock).Text(FText::FromString(TEXT("API Key")))
-				]
-				+ SVerticalBox::Slot().AutoHeight().Padding(0, 4)
-				[
-					SAssignNew(ApiKeyBox, SEditableTextBox).IsPassword(true).Text(FText::FromString(ApiKey))
-				]
-
-				+ SVerticalBox::Slot().AutoHeight().Padding(0, 8)
-				[
-					SNew(STextBlock).Text(FText::FromString(TEXT("Model")))
-				]
-				+ SVerticalBox::Slot().AutoHeight().Padding(0, 4)
-				[
-					SAssignNew(ModelBox, SEditableTextBox).Text(FText::FromString(Model))
-				]
-
-				+ SVerticalBox::Slot().AutoHeight().Padding(0, 12)
-				[
 					SNew(SHorizontalBox)
+					+ SHorizontalBox::Slot().AutoWidth()
+					[
+						SNew(SButton)
+						.Text(FText::FromString(TEXT("< Back")))
+						.OnClicked(this, &SUEAgentBridgePanel::OnBackFromSettingsClicked)
+					]
+					+ SHorizontalBox::Slot().FillWidth(1.0f).VAlign(VAlign_Center).Padding(8, 0)
+					[
+						SNew(STextBlock).Text(FText::FromString(TEXT("Settings")))
+					]
 					+ SHorizontalBox::Slot().AutoWidth()
 					[
 						SNew(SButton)
@@ -755,7 +1061,131 @@ public:
 						.OnClicked(this, &SUEAgentBridgePanel::OnSaveSettingsClicked)
 					]
 				]
+
+				+ SVerticalBox::Slot().AutoHeight().Padding(0, 6)
+				[
+					SNew(SSeparator)
+				]
+
+				+ SVerticalBox::Slot().FillHeight(1.0f)
+				[
+					SNew(SScrollBox)
+
+					+ SScrollBox::Slot()
+					[
+						SNew(SVerticalBox)
+
+						+ SVerticalBox::Slot().AutoHeight().Padding(0, 6)
+						[
+							SNew(STextBlock).Text(FText::FromString(TEXT("Provider preset")))
+						]
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							SAssignNew(ProviderPresetCombo, SComboBox<TSharedPtr<FString>>)
+							.OptionsSource(&ProviderPresetOptions)
+							.InitiallySelectedItem(SelectedProviderPresetLabel)
+							.OnGenerateWidget_Lambda([](TSharedPtr<FString> Item)
+							{
+								return SNew(STextBlock).Text(FText::FromString(Item.IsValid() ? *Item : TEXT("")));
+							})
+							.OnSelectionChanged(this, &SUEAgentBridgePanel::OnProviderPresetChanged)
+							[
+								SNew(STextBlock).Text(this, &SUEAgentBridgePanel::GetProviderPresetText)
+							]
+						]
+
+						+ SVerticalBox::Slot().AutoHeight().Padding(0, 10)
+						[
+							SNew(STextBlock).Text(FText::FromString(TEXT("Base URL")))
+						]
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							SAssignNew(BaseUrlBox, SEditableTextBox)
+							.Text(FText::FromString(BaseUrl))
+							.IsEnabled(this, &SUEAgentBridgePanel::CanEditBaseUrl)
+							.OnTextCommitted(this, &SUEAgentBridgePanel::OnBaseUrlCommitted)
+						]
+
+						+ SVerticalBox::Slot().AutoHeight().Padding(0, 10)
+						[
+							SNew(STextBlock).Text(FText::FromString(TEXT("API Key")))
+						]
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							SAssignNew(ApiKeyBox, SEditableTextBox)
+							.IsPassword(true)
+							.Text(FText::FromString(ApiKey))
+							.OnTextCommitted(this, &SUEAgentBridgePanel::OnApiKeyCommitted)
+						]
+
+						+ SVerticalBox::Slot().AutoHeight().Padding(0, 10)
+						[
+							SNew(STextBlock).Text(FText::FromString(TEXT("Model")))
+						]
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot().FillWidth(1.0f)
+							[
+								SAssignNew(ModelCombo, SComboBox<TSharedPtr<FString>>)
+								.OptionsSource(&ModelOptions)
+								.InitiallySelectedItem(SelectedModelLabel)
+								.OnGenerateWidget_Lambda([](TSharedPtr<FString> Item)
+								{
+									return SNew(STextBlock).Text(FText::FromString(Item.IsValid() ? *Item : TEXT("")));
+								})
+								.OnSelectionChanged(this, &SUEAgentBridgePanel::OnModelSelected)
+								[
+									SNew(STextBlock).Text(this, &SUEAgentBridgePanel::GetModelText)
+								]
+							]
+							+ SHorizontalBox::Slot().AutoWidth().Padding(8, 0)
+							[
+								SNew(SButton)
+								.Text(FText::FromString(TEXT("Refresh")))
+								.OnClicked(this, &SUEAgentBridgePanel::OnRefreshModelsClicked)
+							]
+						]
+
+						+ SVerticalBox::Slot().AutoHeight().Padding(0, 6)
+						[
+							SAssignNew(ModelBox, SEditableTextBox)
+							.Text(FText::FromString(Model))
+							.OnTextCommitted(this, &SUEAgentBridgePanel::OnModelCommitted)
+						]
+
+						+ SVerticalBox::Slot().AutoHeight().Padding(0, 12)
+						[
+							SNew(SSeparator)
+						]
+
+						+ SVerticalBox::Slot().AutoHeight().Padding(0, 6)
+						[
+							SNew(STextBlock).Text(FText::FromString(TEXT("Selection prompt")))
+						]
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							SNew(SHorizontalBox)
+							+ SHorizontalBox::Slot().AutoWidth()
+							[
+								SNew(SButton)
+								.Text(FText::FromString(TEXT("Insert to chat input")))
+								.OnClicked(this, &SUEAgentBridgePanel::OnInsertSelectionPromptFromSettingsClicked)
+							]
+						]
+					]
+				]
 			];
+	}
+
+	FReply OnInsertSelectionPromptFromSettingsClicked()
+	{
+		OnInsertAIPromptClicked();
+		if (RightSwitcher.IsValid())
+		{
+			RightSwitcher->SetActiveWidgetIndex(0);
+		}
+		return FReply::Handled();
 	}
 
 	void AppendTranscript(const FString& Line)
@@ -804,24 +1234,6 @@ public:
 	void OnModelCommitted(const FText& NewText, ETextCommit::Type)
 	{
 		Model = NewText.ToString();
-	}
-
-	void OnProviderChanged(TSharedPtr<FString> NewValue, ESelectInfo::Type)
-	{
-		SelectedProviderLabel = NewValue;
-		if (NewValue.IsValid() && *NewValue == TEXT("Ollama Cloud"))
-		{
-			Provider = EUEAgentProvider::OllamaCloud;
-		}
-		else
-		{
-			Provider = EUEAgentProvider::OpenAICompatible;
-		}
-	}
-
-	FText GetProviderText() const
-	{
-		return FText::FromString(SelectedProviderLabel.IsValid() ? *SelectedProviderLabel : TEXT(""));
 	}
 
 	FReply OnNewConversationClicked()
@@ -1326,8 +1738,16 @@ private:
 	TSharedPtr<SEditableTextBox> BaseUrlBox;
 	TSharedPtr<SEditableTextBox> ApiKeyBox;
 	TSharedPtr<SEditableTextBox> ModelBox;
-	TSharedPtr<SComboBox<TSharedPtr<FString>>> ProviderCombo;
-	TWeakPtr<SWindow> SettingsWindow;
+	TSharedPtr<SWidgetSwitcher> RightSwitcher;
+
+	TArray<FProviderPreset> ProviderPresets;
+	TArray<TSharedPtr<FString>> ProviderPresetOptions;
+	TSharedPtr<SComboBox<TSharedPtr<FString>>> ProviderPresetCombo;
+	TSharedPtr<FString> SelectedProviderPresetLabel;
+
+	TArray<TSharedPtr<FString>> ModelOptions;
+	TSharedPtr<SComboBox<TSharedPtr<FString>>> ModelCombo;
+	TSharedPtr<FString> SelectedModelLabel;
 
 	FString Transcript;
 
@@ -1343,9 +1763,6 @@ private:
 	TArray<FAgentMessage> Messages;
 
 	FHttpRequestPtr ActiveRequest;
-
-	TArray<TSharedPtr<FString>> ProviderOptions;
-	TSharedPtr<FString> SelectedProviderLabel;
 
 	TArray<FConversation> Conversations;
 	FString ActiveConversationId;
