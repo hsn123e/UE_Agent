@@ -1142,6 +1142,13 @@ public:
 				+ SHorizontalBox::Slot().AutoWidth().Padding(8, 0)
 				[
 					SNew(SButton)
+					.Text(FText::FromString(TEXT("Stop")))
+					.OnClicked(this, &SUEAgentBridgePanel::OnStopClicked)
+					.IsEnabled(this, &SUEAgentBridgePanel::CanStop)
+				]
+				+ SHorizontalBox::Slot().AutoWidth().Padding(8, 0)
+				[
+					SNew(SButton)
 					.Text(FText::FromString(TEXT("Clear")))
 					.OnClicked(this, &SUEAgentBridgePanel::OnClearClicked)
 				]
@@ -1376,8 +1383,31 @@ public:
 		return !bBusy;
 	}
 
+	bool CanStop() const
+	{
+		return bBusy;
+	}
+
+	FReply OnStopClicked()
+	{
+		StepsRemaining = 0;
+		bBusy = false;
+		bDisableToolCalling = false;
+
+		if (ActiveRequest.IsValid())
+		{
+			ActiveRequest->CancelRequest();
+			ActiveRequest.Reset();
+		}
+
+		AppendTranscript(TEXT("[agent] stopped"));
+		return FReply::Handled();
+	}
+
 	FReply OnClearClicked()
 	{
+		OnStopClicked();
+
 		Transcript.Empty();
 		if (TranscriptBox.IsValid())
 		{
