@@ -36,8 +36,16 @@ private:
 	bool HandleTool_LevelSaveCurrent(const FHttpResultCallback& OnComplete);
 	bool HandleTool_AssetSearch(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_AssetCreateBlueprint(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
+	bool HandleTool_BlueprintCompile(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_BlueprintGetGraphT3D(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_BlueprintPasteT3D(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
+	bool HandleTool_BlueprintK2ListGraphs(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
+	bool HandleTool_BlueprintK2ListNodes(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
+	bool HandleTool_BlueprintK2AddBeginPlay(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
+	bool HandleTool_BlueprintK2AddCallFunction(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
+	bool HandleTool_BlueprintK2ConnectPins(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
+	bool HandleTool_AICreateBehaviorTree(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
+	bool HandleTool_AICreateBlackboard(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_UmgCreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_UmgAddWidget(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_UmgSetText(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);

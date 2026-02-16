@@ -40,6 +40,9 @@
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraphUtilities.h"
 #include "EdGraphSchema_K2.h"
+#include "K2Node_CallFunction.h"
+#include "K2Node_CustomEvent.h"
+#include "K2Node_Event.h"
 
 #include "WidgetBlueprint.h"
 #include "WidgetBlueprintFactory.h"
@@ -57,6 +60,11 @@
 
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimationAsset.h"
+
+#include "BehaviorTree/BehaviorTree.h"
+#include "BehaviorTree/BlackboardData.h"
+#include "BehaviorTreeFactory.h"
+#include "BlackboardDataFactory.h"
 
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonWriter.h"
@@ -174,7 +182,11 @@ static FString GetAgentSystemPrompt()
 		"- editor.create_blueprint_from_selected_actor, editor.set_selected_skeletal_animation\n"
 		"- level.save_current, level.spawn_actor\n"
 		"- asset.search, asset.create_blueprint\n"
+		"- ai.create_behavior_tree, ai.create_blackboard\n"
+		"- blueprint.compile\n"
 		"- blueprint.get_graph_t3d, blueprint.paste_t3d\n"
+		"- blueprint.k2.list_graphs, blueprint.k2.list_nodes\n"
+		"- blueprint.k2.add_begin_play, blueprint.k2.add_call_function, blueprint.k2.connect_pins\n"
 		"- umg.create_widget_blueprint, umg.add_widget, umg.set_text, umg.set_properties, umg.scaffold_layout\n"
 		"- umg.bind_event, umg.bind_property, umg.unbind, umg.list_widgets, umg.compile\n"
 		"\n"
@@ -2379,6 +2391,250 @@ bool FUEAgentBridgeModule::HandleTools(const FHttpServerRequest& Request, const 
 
 	{
 		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("blueprint.compile"));
+		Tool->SetStringField(TEXT("description"), TEXT("Compile a Blueprint asset."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto BpProp = MakeShared<FJsonObject>();
+		BpProp->SetStringField(TEXT("type"), TEXT("string"));
+		BpProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("blueprint.k2.list_graphs"));
+		Tool->SetStringField(TEXT("description"), TEXT("List graphs in a Blueprint (Ubergraph, functions, macros)."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto BpProp = MakeShared<FJsonObject>();
+		BpProp->SetStringField(TEXT("type"), TEXT("string"));
+		BpProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("blueprint.k2.list_nodes"));
+		Tool->SetStringField(TEXT("description"), TEXT("List nodes and pins in a Blueprint graph (returns node GUIDs)."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto BpProp = MakeShared<FJsonObject>();
+		BpProp->SetStringField(TEXT("type"), TEXT("string"));
+		BpProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+
+		auto GraphNameProp = MakeShared<FJsonObject>();
+		GraphNameProp->SetStringField(TEXT("type"), TEXT("string"));
+		GraphNameProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("graphName"), GraphNameProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("graphName")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("blueprint.k2.add_begin_play"));
+		Tool->SetStringField(TEXT("description"), TEXT("Add an Event BeginPlay node to a Blueprint EventGraph."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto BpProp = MakeShared<FJsonObject>();
+		BpProp->SetStringField(TEXT("type"), TEXT("string"));
+		BpProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+
+		auto GraphNameProp = MakeShared<FJsonObject>();
+		GraphNameProp->SetStringField(TEXT("type"), TEXT("string"));
+		GraphNameProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("graphName"), GraphNameProp);
+
+		auto XProp = MakeShared<FJsonObject>(); XProp->SetStringField(TEXT("type"), TEXT("number"));
+		auto YProp = MakeShared<FJsonObject>(); YProp->SetStringField(TEXT("type"), TEXT("number"));
+		Props->SetObjectField(TEXT("x"), XProp);
+		Props->SetObjectField(TEXT("y"), YProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("graphName")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("blueprint.k2.add_call_function"));
+		Tool->SetStringField(TEXT("description"), TEXT("Add a CallFunction node by function path, e.g. /Script/Engine.KismetSystemLibrary:Delay"));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto BpProp = MakeShared<FJsonObject>();
+		BpProp->SetStringField(TEXT("type"), TEXT("string"));
+		BpProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+
+		auto GraphNameProp = MakeShared<FJsonObject>();
+		GraphNameProp->SetStringField(TEXT("type"), TEXT("string"));
+		GraphNameProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("graphName"), GraphNameProp);
+
+		auto FuncProp = MakeShared<FJsonObject>();
+		FuncProp->SetStringField(TEXT("type"), TEXT("string"));
+		FuncProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("functionPath"), FuncProp);
+
+		auto XProp = MakeShared<FJsonObject>(); XProp->SetStringField(TEXT("type"), TEXT("number"));
+		auto YProp = MakeShared<FJsonObject>(); YProp->SetStringField(TEXT("type"), TEXT("number"));
+		Props->SetObjectField(TEXT("x"), XProp);
+		Props->SetObjectField(TEXT("y"), YProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("graphName")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("functionPath")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("blueprint.k2.connect_pins"));
+		Tool->SetStringField(TEXT("description"), TEXT("Connect two pins by node GUID + pin name."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto BpProp = MakeShared<FJsonObject>();
+		BpProp->SetStringField(TEXT("type"), TEXT("string"));
+		BpProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+
+		auto GraphNameProp = MakeShared<FJsonObject>();
+		GraphNameProp->SetStringField(TEXT("type"), TEXT("string"));
+		GraphNameProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("graphName"), GraphNameProp);
+
+		auto FromNodeProp = MakeShared<FJsonObject>();
+		FromNodeProp->SetStringField(TEXT("type"), TEXT("string"));
+		FromNodeProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("fromNodeGuid"), FromNodeProp);
+
+		auto FromPinProp = MakeShared<FJsonObject>();
+		FromPinProp->SetStringField(TEXT("type"), TEXT("string"));
+		FromPinProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("fromPin"), FromPinProp);
+
+		auto ToNodeProp = MakeShared<FJsonObject>();
+		ToNodeProp->SetStringField(TEXT("type"), TEXT("string"));
+		ToNodeProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("toNodeGuid"), ToNodeProp);
+
+		auto ToPinProp = MakeShared<FJsonObject>();
+		ToPinProp->SetStringField(TEXT("type"), TEXT("string"));
+		ToPinProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("toPin"), ToPinProp);
+
+		auto CompileProp = MakeShared<FJsonObject>();
+		CompileProp->SetStringField(TEXT("type"), TEXT("boolean"));
+		Props->SetObjectField(TEXT("compile"), CompileProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("graphName")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("fromNodeGuid")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("fromPin")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("toNodeGuid")));
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("toPin")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("ai.create_behavior_tree"));
+		Tool->SetStringField(TEXT("description"), TEXT("Create a BehaviorTree asset at /Game/..."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto AssetPathProp = MakeShared<FJsonObject>();
+		AssetPathProp->SetStringField(TEXT("type"), TEXT("string"));
+		AssetPathProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("assetPath"), AssetPathProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("assetPath")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("ai.create_blackboard"));
+		Tool->SetStringField(TEXT("description"), TEXT("Create a BlackboardData asset at /Game/..."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto AssetPathProp = MakeShared<FJsonObject>();
+		AssetPathProp->SetStringField(TEXT("type"), TEXT("string"));
+		AssetPathProp->SetNumberField(TEXT("minLength"), 1);
+		Props->SetObjectField(TEXT("assetPath"), AssetPathProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		TArray<TSharedPtr<FJsonValue>> ReqArr;
+		ReqArr.Add(MakeShared<FJsonValueString>(TEXT("assetPath")));
+		Schema->SetArrayField(TEXT("required"), ReqArr);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
 		Tool->SetStringField(TEXT("name"), TEXT("umg.create_widget_blueprint"));
 		Tool->SetStringField(TEXT("description"), TEXT("Create a WidgetBlueprint asset at /Game/... (UMG)."));
 		auto Schema = MakeShared<FJsonObject>();
@@ -2981,8 +3237,16 @@ bool FUEAgentBridgeModule::ExecuteToolForUI(const FString& ToolName, const TShar
 	else if (ToolKey == TEXT("level.spawn_actor")) { HandleTool_LevelSpawnActor(Input, Cb); }
 	else if (ToolKey == TEXT("asset.search")) { HandleTool_AssetSearch(Input, Cb); }
 	else if (ToolKey == TEXT("asset.create_blueprint")) { HandleTool_AssetCreateBlueprint(Input, Cb); }
+	else if (ToolKey == TEXT("ai.create_behavior_tree")) { HandleTool_AICreateBehaviorTree(Input, Cb); }
+	else if (ToolKey == TEXT("ai.create_blackboard")) { HandleTool_AICreateBlackboard(Input, Cb); }
+	else if (ToolKey == TEXT("blueprint.compile")) { HandleTool_BlueprintCompile(Input, Cb); }
 	else if (ToolKey == TEXT("blueprint.get_graph_t3d")) { HandleTool_BlueprintGetGraphT3D(Input, Cb); }
 	else if (ToolKey == TEXT("blueprint.paste_t3d")) { HandleTool_BlueprintPasteT3D(Input, Cb); }
+	else if (ToolKey == TEXT("blueprint.k2.list_graphs")) { HandleTool_BlueprintK2ListGraphs(Input, Cb); }
+	else if (ToolKey == TEXT("blueprint.k2.list_nodes")) { HandleTool_BlueprintK2ListNodes(Input, Cb); }
+	else if (ToolKey == TEXT("blueprint.k2.add_begin_play")) { HandleTool_BlueprintK2AddBeginPlay(Input, Cb); }
+	else if (ToolKey == TEXT("blueprint.k2.add_call_function")) { HandleTool_BlueprintK2AddCallFunction(Input, Cb); }
+	else if (ToolKey == TEXT("blueprint.k2.connect_pins")) { HandleTool_BlueprintK2ConnectPins(Input, Cb); }
 	else if (ToolKey == TEXT("umg.create_widget_blueprint")) { HandleTool_UmgCreateWidgetBlueprint(Input, Cb); }
 	else if (ToolKey == TEXT("umg.add_widget")) { HandleTool_UmgAddWidget(Input, Cb); }
 	else if (ToolKey == TEXT("umg.set_text")) { HandleTool_UmgSetText(Input, Cb); }
@@ -3060,121 +3324,39 @@ bool FUEAgentBridgeModule::HandleToolCall(const FHttpServerRequest& Request, con
 
 	AsyncTask(ENamedThreads::GameThread, [this, ToolName, InputObj, OnComplete]()
 	{
-		if (ToolName == TEXT("project.get_directory"))
-		{
-			HandleTool_ProjectGetDirectory(OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("project.get_name"))
-		{
-			HandleTool_ProjectGetName(OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("editor.get_selected_actors"))
-		{
-			HandleTool_EditorGetSelectedActors(OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("editor.get_selected_actor_details"))
-		{
-			HandleTool_EditorGetSelectedActorDetails(OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("editor.get_world_info"))
-		{
-			HandleTool_EditorGetWorldInfo(OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("editor.create_blueprint_from_selected_actor"))
-		{
-			HandleTool_EditorCreateBlueprintFromSelectedActor(InputObj, OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("editor.set_selected_skeletal_animation"))
-		{
-			HandleTool_EditorSetSelectedSkeletalAnimation(InputObj, OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("level.save_current"))
-		{
-			HandleTool_LevelSaveCurrent(OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("level.spawn_actor"))
-		{
-			HandleTool_LevelSpawnActor(InputObj, OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("asset.search"))
-		{
-			HandleTool_AssetSearch(InputObj, OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("asset.create_blueprint"))
-		{
-			HandleTool_AssetCreateBlueprint(InputObj, OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("blueprint.get_graph_t3d"))
-		{
-			HandleTool_BlueprintGetGraphT3D(InputObj, OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("blueprint.paste_t3d"))
-		{
-			HandleTool_BlueprintPasteT3D(InputObj, OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("umg.create_widget_blueprint"))
-		{
-			HandleTool_UmgCreateWidgetBlueprint(InputObj, OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("umg.add_widget"))
-		{
-			HandleTool_UmgAddWidget(InputObj, OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("umg.set_text"))
-		{
-			HandleTool_UmgSetText(InputObj, OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("umg.set_properties"))
-		{
-			HandleTool_UmgSetProperties(InputObj, OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("umg.scaffold_layout"))
-		{
-			HandleTool_UmgScaffoldLayout(InputObj, OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("umg.bind_event"))
-		{
-			HandleTool_UmgBindEvent(InputObj, OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("umg.bind_property"))
-		{
-			HandleTool_UmgBindProperty(InputObj, OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("umg.unbind"))
-		{
-			HandleTool_UmgUnbind(InputObj, OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("umg.list_widgets"))
-		{
-			HandleTool_UmgListWidgets(InputObj, OnComplete);
-			return;
-		}
-		if (ToolName == TEXT("umg.compile"))
-		{
-			HandleTool_UmgCompile(InputObj, OnComplete);
-			return;
-		}
+		const FString ToolKey = ToolName.ToLower();
+
+		if (ToolKey == TEXT("project.get_directory")) { HandleTool_ProjectGetDirectory(OnComplete); return; }
+		if (ToolKey == TEXT("project.get_name")) { HandleTool_ProjectGetName(OnComplete); return; }
+		if (ToolKey == TEXT("editor.get_selected_actors")) { HandleTool_EditorGetSelectedActors(OnComplete); return; }
+		if (ToolKey == TEXT("editor.get_selected_actor_details")) { HandleTool_EditorGetSelectedActorDetails(OnComplete); return; }
+		if (ToolKey == TEXT("editor.get_world_info")) { HandleTool_EditorGetWorldInfo(OnComplete); return; }
+		if (ToolKey == TEXT("editor.create_blueprint_from_selected_actor")) { HandleTool_EditorCreateBlueprintFromSelectedActor(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("editor.set_selected_skeletal_animation")) { HandleTool_EditorSetSelectedSkeletalAnimation(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("level.save_current")) { HandleTool_LevelSaveCurrent(OnComplete); return; }
+		if (ToolKey == TEXT("level.spawn_actor")) { HandleTool_LevelSpawnActor(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("asset.search")) { HandleTool_AssetSearch(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("asset.create_blueprint")) { HandleTool_AssetCreateBlueprint(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("ai.create_behavior_tree")) { HandleTool_AICreateBehaviorTree(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("ai.create_blackboard")) { HandleTool_AICreateBlackboard(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("blueprint.compile")) { HandleTool_BlueprintCompile(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("blueprint.get_graph_t3d")) { HandleTool_BlueprintGetGraphT3D(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("blueprint.paste_t3d")) { HandleTool_BlueprintPasteT3D(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("blueprint.k2.list_graphs")) { HandleTool_BlueprintK2ListGraphs(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("blueprint.k2.list_nodes")) { HandleTool_BlueprintK2ListNodes(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("blueprint.k2.add_begin_play")) { HandleTool_BlueprintK2AddBeginPlay(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("blueprint.k2.add_call_function")) { HandleTool_BlueprintK2AddCallFunction(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("blueprint.k2.connect_pins")) { HandleTool_BlueprintK2ConnectPins(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("umg.create_widget_blueprint")) { HandleTool_UmgCreateWidgetBlueprint(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("umg.add_widget")) { HandleTool_UmgAddWidget(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("umg.set_text")) { HandleTool_UmgSetText(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("umg.set_properties")) { HandleTool_UmgSetProperties(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("umg.scaffold_layout")) { HandleTool_UmgScaffoldLayout(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("umg.bind_event")) { HandleTool_UmgBindEvent(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("umg.bind_property")) { HandleTool_UmgBindProperty(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("umg.unbind")) { HandleTool_UmgUnbind(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("umg.list_widgets")) { HandleTool_UmgListWidgets(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("umg.compile")) { HandleTool_UmgCompile(InputObj, OnComplete); return; }
 
 		auto Out = MakeShared<FJsonObject>();
 		Out->SetBoolField(TEXT("ok"), false);
@@ -3788,6 +3970,647 @@ static UEdGraph* FindBlueprintGraph(UBlueprint* BP, const FString& GraphName)
 	}
 
 	return nullptr;
+}
+
+static UEdGraphNode* FindNodeByGuid(UEdGraph* Graph, const FGuid& Guid)
+{
+	if (!Graph)
+	{
+		return nullptr;
+	}
+	for (UEdGraphNode* Node : Graph->Nodes)
+	{
+		if (Node && Node->NodeGuid == Guid)
+		{
+			return Node;
+		}
+	}
+	return nullptr;
+}
+
+static UEdGraphPin* FindPinByName(UEdGraphNode* Node, const FString& PinName)
+{
+	if (!Node)
+	{
+		return nullptr;
+	}
+	const FName Target(*PinName);
+	for (UEdGraphPin* Pin : Node->Pins)
+	{
+		if (Pin && Pin->PinName == Target)
+		{
+			return Pin;
+		}
+	}
+	return nullptr;
+}
+
+static bool ParseFunctionPath(const FString& FunctionPath, FString& OutClassPath, FString& OutFunctionName)
+{
+	FString ClassPath;
+	FString FuncName;
+	if (!FunctionPath.Split(TEXT(":"), &ClassPath, &FuncName, ESearchCase::IgnoreCase, ESearchDir::FromEnd))
+	{
+		return false;
+	}
+	ClassPath.TrimStartAndEndInline();
+	FuncName.TrimStartAndEndInline();
+	if (ClassPath.IsEmpty() || FuncName.IsEmpty())
+	{
+		return false;
+	}
+	OutClassPath = ClassPath;
+	OutFunctionName = FuncName;
+	return true;
+}
+
+bool FUEAgentBridgeModule::HandleTool_BlueprintCompile(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString BlueprintPath;
+	if (!Input->TryGetStringField(TEXT("blueprintPath"), BlueprintPath) || BlueprintPath.IsEmpty())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing blueprintPath"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UBlueprint* BP = LoadBlueprintByPath(BlueprintPath);
+	if (!BP)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load blueprint"));
+		Out->SetStringField(TEXT("blueprintPath"), BlueprintPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FKismetEditorUtilities::CompileBlueprint(BP);
+	if (UPackage* Package = BP->GetOutermost())
+	{
+		Package->MarkPackageDirty();
+	}
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetStringField(TEXT("result"), TEXT("compiled"));
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
+bool FUEAgentBridgeModule::HandleTool_BlueprintK2ListGraphs(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString BlueprintPath;
+	if (!Input->TryGetStringField(TEXT("blueprintPath"), BlueprintPath) || BlueprintPath.IsEmpty())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing blueprintPath"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UBlueprint* BP = LoadBlueprintByPath(BlueprintPath);
+	if (!BP)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load blueprint"));
+		Out->SetStringField(TEXT("blueprintPath"), BlueprintPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Uber;
+	for (UEdGraph* G : BP->UbergraphPages)
+	{
+		if (G)
+		{
+			Uber.Add(MakeShared<FJsonValueString>(G->GetName()));
+		}
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Funcs;
+	for (UEdGraph* G : BP->FunctionGraphs)
+	{
+		if (G)
+		{
+			Funcs.Add(MakeShared<FJsonValueString>(G->GetName()));
+		}
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Macros;
+	for (UEdGraph* G : BP->MacroGraphs)
+	{
+		if (G)
+		{
+			Macros.Add(MakeShared<FJsonValueString>(G->GetName()));
+		}
+	}
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetArrayField(TEXT("ubergraphPages"), Uber);
+	Out->SetArrayField(TEXT("functionGraphs"), Funcs);
+	Out->SetArrayField(TEXT("macroGraphs"), Macros);
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
+bool FUEAgentBridgeModule::HandleTool_BlueprintK2ListNodes(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString BlueprintPath;
+	FString GraphName;
+	if (!Input->TryGetStringField(TEXT("blueprintPath"), BlueprintPath) || BlueprintPath.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("graphName"), GraphName) || GraphName.IsEmpty())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing blueprintPath or graphName"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UBlueprint* BP = LoadBlueprintByPath(BlueprintPath);
+	if (!BP)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load blueprint"));
+		Out->SetStringField(TEXT("blueprintPath"), BlueprintPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UEdGraph* Graph = FindBlueprintGraph(BP, GraphName);
+	if (!Graph)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Graph not found"));
+		Out->SetStringField(TEXT("graphName"), GraphName);
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	TArray<TSharedPtr<FJsonValue>> Nodes;
+	for (UEdGraphNode* Node : Graph->Nodes)
+	{
+		if (!Node)
+		{
+			continue;
+		}
+
+		auto N = MakeShared<FJsonObject>();
+		N->SetStringField(TEXT("guid"), Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
+		N->SetStringField(TEXT("classPath"), Node->GetClass()->GetPathName());
+		N->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
+		N->SetNumberField(TEXT("x"), Node->NodePosX);
+		N->SetNumberField(TEXT("y"), Node->NodePosY);
+
+		TArray<TSharedPtr<FJsonValue>> Pins;
+		for (UEdGraphPin* Pin : Node->Pins)
+		{
+			if (!Pin)
+			{
+				continue;
+			}
+			auto P = MakeShared<FJsonObject>();
+			P->SetStringField(TEXT("name"), Pin->PinName.ToString());
+			P->SetStringField(TEXT("direction"), Pin->Direction == EGPD_Input ? TEXT("input") : TEXT("output"));
+			P->SetStringField(TEXT("category"), Pin->PinType.PinCategory.ToString());
+			P->SetStringField(TEXT("subcategory"), Pin->PinType.PinSubCategory.ToString());
+			P->SetStringField(TEXT("subcategoryObject"), Pin->PinType.PinSubCategoryObject.IsValid() ? Pin->PinType.PinSubCategoryObject->GetPathName() : TEXT(""));
+			Pins.Add(MakeShared<FJsonValueObject>(P));
+		}
+		N->SetArrayField(TEXT("pins"), Pins);
+
+		Nodes.Add(MakeShared<FJsonValueObject>(N));
+	}
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetArrayField(TEXT("result"), Nodes);
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
+bool FUEAgentBridgeModule::HandleTool_BlueprintK2AddBeginPlay(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString BlueprintPath;
+	FString GraphName;
+	if (!Input->TryGetStringField(TEXT("blueprintPath"), BlueprintPath) || BlueprintPath.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("graphName"), GraphName) || GraphName.IsEmpty())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing blueprintPath or graphName"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UBlueprint* BP = LoadBlueprintByPath(BlueprintPath);
+	if (!BP)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load blueprint"));
+		Out->SetStringField(TEXT("blueprintPath"), BlueprintPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UEdGraph* Graph = FindBlueprintGraph(BP, GraphName);
+	if (!Graph)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Graph not found"));
+		Out->SetStringField(TEXT("graphName"), GraphName);
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	double X = 0, Y = 0;
+	Input->TryGetNumberField(TEXT("x"), X);
+	Input->TryGetNumberField(TEXT("y"), Y);
+
+	BP->Modify();
+	Graph->Modify();
+
+	FGraphNodeCreator<UK2Node_Event> Creator(*Graph);
+	UK2Node_Event* Node = Creator.CreateNode();
+	Node->NodePosX = (int32)X;
+	Node->NodePosY = (int32)Y;
+	Node->EventReference.SetExternalMember(FName(TEXT("ReceiveBeginPlay")), AActor::StaticClass());
+	Node->bOverrideFunction = true;
+	Node->AllocateDefaultPins();
+	Creator.Finalize();
+
+	FKismetEditorUtilities::CompileBlueprint(BP);
+	if (UPackage* Package = BP->GetOutermost())
+	{
+		Package->MarkPackageDirty();
+	}
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetStringField(TEXT("result"), Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
+bool FUEAgentBridgeModule::HandleTool_BlueprintK2AddCallFunction(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString BlueprintPath;
+	FString GraphName;
+	FString FunctionPath;
+	if (!Input->TryGetStringField(TEXT("blueprintPath"), BlueprintPath) || BlueprintPath.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("graphName"), GraphName) || GraphName.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("functionPath"), FunctionPath) || FunctionPath.IsEmpty())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing blueprintPath, graphName, or functionPath"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString ClassPath;
+	FString FuncName;
+	if (!ParseFunctionPath(FunctionPath, ClassPath, FuncName))
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Invalid functionPath (expected ClassPath:FunctionName)"));
+		Out->SetStringField(TEXT("functionPath"), FunctionPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UBlueprint* BP = LoadBlueprintByPath(BlueprintPath);
+	if (!BP)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load blueprint"));
+		Out->SetStringField(TEXT("blueprintPath"), BlueprintPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UEdGraph* Graph = FindBlueprintGraph(BP, GraphName);
+	if (!Graph)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Graph not found"));
+		Out->SetStringField(TEXT("graphName"), GraphName);
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	UClass* OwnerClass = StaticLoadClass(UObject::StaticClass(), nullptr, *ClassPath);
+	if (!OwnerClass)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load class"));
+		Out->SetStringField(TEXT("classPath"), ClassPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UFunction* Func = OwnerClass->FindFunctionByName(FName(*FuncName));
+	if (!Func)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Function not found"));
+		Out->SetStringField(TEXT("functionName"), FuncName);
+		Out->SetStringField(TEXT("classPath"), OwnerClass->GetPathName());
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	double X = 0, Y = 0;
+	Input->TryGetNumberField(TEXT("x"), X);
+	Input->TryGetNumberField(TEXT("y"), Y);
+
+	BP->Modify();
+	Graph->Modify();
+
+	FGraphNodeCreator<UK2Node_CallFunction> Creator(*Graph);
+	UK2Node_CallFunction* Node = Creator.CreateNode();
+	Node->NodePosX = (int32)X;
+	Node->NodePosY = (int32)Y;
+	Node->SetFromFunction(Func);
+	Node->AllocateDefaultPins();
+	Creator.Finalize();
+
+	FKismetEditorUtilities::CompileBlueprint(BP);
+	if (UPackage* Package = BP->GetOutermost())
+	{
+		Package->MarkPackageDirty();
+	}
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetStringField(TEXT("result"), Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphensLower));
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
+bool FUEAgentBridgeModule::HandleTool_BlueprintK2ConnectPins(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString BlueprintPath;
+	FString GraphName;
+	FString FromGuidStr;
+	FString FromPinName;
+	FString ToGuidStr;
+	FString ToPinName;
+	if (!Input->TryGetStringField(TEXT("blueprintPath"), BlueprintPath) || BlueprintPath.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("graphName"), GraphName) || GraphName.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("fromNodeGuid"), FromGuidStr) || FromGuidStr.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("fromPin"), FromPinName) || FromPinName.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("toNodeGuid"), ToGuidStr) || ToGuidStr.IsEmpty() ||
+		!Input->TryGetStringField(TEXT("toPin"), ToPinName) || ToPinName.IsEmpty())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing required fields"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FGuid FromGuid, ToGuid;
+	if (!FGuid::Parse(FromGuidStr, FromGuid) || !FGuid::Parse(ToGuidStr, ToGuid))
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Invalid GUID"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UBlueprint* BP = LoadBlueprintByPath(BlueprintPath);
+	if (!BP)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to load blueprint"));
+		Out->SetStringField(TEXT("blueprintPath"), BlueprintPath);
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UEdGraph* Graph = FindBlueprintGraph(BP, GraphName);
+	if (!Graph)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Graph not found"));
+		Out->SetStringField(TEXT("graphName"), GraphName);
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	UEdGraphNode* FromNode = FindNodeByGuid(Graph, FromGuid);
+	UEdGraphNode* ToNode = FindNodeByGuid(Graph, ToGuid);
+	if (!FromNode || !ToNode)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Node not found"));
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	UEdGraphPin* FromPin = FindPinByName(FromNode, FromPinName);
+	UEdGraphPin* ToPin = FindPinByName(ToNode, ToPinName);
+	if (!FromPin || !ToPin)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Pin not found"));
+		OnComplete(JsonResponse(Out, 404));
+		return true;
+	}
+
+	const UEdGraphSchema* Schema = Graph->GetSchema();
+	if (!Schema)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing schema"));
+		OnComplete(JsonResponse(Out, 500));
+		return true;
+	}
+
+	BP->Modify();
+	Graph->Modify();
+	FromNode->Modify();
+	ToNode->Modify();
+
+	const bool bOk = Schema->TryCreateConnection(FromPin, ToPin);
+	bool bCompile = true;
+	Input->TryGetBoolField(TEXT("compile"), bCompile);
+	if (bCompile)
+	{
+		FKismetEditorUtilities::CompileBlueprint(BP);
+	}
+	if (UPackage* Package = BP->GetOutermost())
+	{
+		Package->MarkPackageDirty();
+	}
+
+	Out->SetBoolField(TEXT("ok"), bOk);
+	Out->SetStringField(TEXT("result"), bOk ? TEXT("connected") : TEXT("failed"));
+	OnComplete(JsonResponse(Out, bOk ? 200 : 400));
+	return true;
+}
+
+static UObject* CreateAssetWithFactory(const FString& AssetPath, UClass* AssetClass, UFactory* Factory, FString& OutError)
+{
+	if (AssetPath.IsEmpty())
+	{
+		OutError = TEXT("Missing assetPath");
+		return nullptr;
+	}
+
+	FString PackagePath = AssetPath;
+	FString AssetName;
+	AssetPath.Split(TEXT("/"), &PackagePath, &AssetName, ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+	if (AssetName.IsEmpty())
+	{
+		OutError = TEXT("Invalid assetPath");
+		return nullptr;
+	}
+
+	if (!Factory)
+	{
+		OutError = TEXT("Missing factory");
+		return nullptr;
+	}
+
+	FAssetToolsModule& ATM = FModuleManager::LoadModuleChecked<FAssetToolsModule>("AssetTools");
+	UObject* NewAsset = ATM.Get().CreateAsset(AssetName, PackagePath, AssetClass, Factory);
+	if (!NewAsset)
+	{
+		OutError = TEXT("Failed to create asset");
+		return nullptr;
+	}
+
+	if (UPackage* Package = NewAsset->GetOutermost())
+	{
+		Package->MarkPackageDirty();
+	}
+	FAssetRegistryModule::AssetCreated(NewAsset);
+	return NewAsset;
+}
+
+bool FUEAgentBridgeModule::HandleTool_AICreateBehaviorTree(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString AssetPath;
+	if (!Input->TryGetStringField(TEXT("assetPath"), AssetPath) || AssetPath.IsEmpty())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing assetPath"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UBehaviorTreeFactory* Factory = NewObject<UBehaviorTreeFactory>();
+	FString Err;
+	UObject* Asset = CreateAssetWithFactory(AssetPath, UBehaviorTree::StaticClass(), Factory, Err);
+	if (!Asset)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), Err);
+		Out->SetStringField(TEXT("assetPath"), AssetPath);
+		OnComplete(JsonResponse(Out, 500));
+		return true;
+	}
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetStringField(TEXT("result"), Asset->GetPathName());
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
+bool FUEAgentBridgeModule::HandleTool_AICreateBlackboard(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+	if (!Input.IsValid())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing input"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	FString AssetPath;
+	if (!Input->TryGetStringField(TEXT("assetPath"), AssetPath) || AssetPath.IsEmpty())
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Missing assetPath"));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	UBlackboardDataFactory* Factory = NewObject<UBlackboardDataFactory>();
+	FString Err;
+	UObject* Asset = CreateAssetWithFactory(AssetPath, UBlackboardData::StaticClass(), Factory, Err);
+	if (!Asset)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), Err);
+		Out->SetStringField(TEXT("assetPath"), AssetPath);
+		OnComplete(JsonResponse(Out, 500));
+		return true;
+	}
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetStringField(TEXT("result"), Asset->GetPathName());
+	OnComplete(JsonResponse(Out, 200));
+	return true;
 }
 
 bool FUEAgentBridgeModule::HandleTool_BlueprintGetGraphT3D(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
