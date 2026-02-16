@@ -282,6 +282,18 @@ public:
 	{
 		FString Role;
 		FString Content;
+
+		// OpenAI tool calling support (optional).
+		// - For role=="assistant": ToolCalls is populated.
+		// - For role=="tool": ToolCallId is populated (links back to assistant tool call id).
+		FString ToolCallId;
+		struct FAgentToolCall
+		{
+			FString Id;
+			FString Name;
+			FString ArgumentsJson;
+		};
+		TArray<FAgentToolCall> ToolCalls;
 	};
 
 	struct FConversation
@@ -380,7 +392,24 @@ public:
 
 				if (M.Role == TEXT("assistant"))
 				{
-					NewTranscript += TEXT("[assistant] ") + M.Content + TEXT("\n");
+					for (const FAgentMessage::FAgentToolCall& TC : M.ToolCalls)
+					{
+						if (!TC.Name.IsEmpty())
+						{
+							NewTranscript += TEXT("[tool] ") + TC.Name + TEXT("\n");
+						}
+					}
+
+					if (!M.Content.IsEmpty())
+					{
+						NewTranscript += TEXT("[assistant] ") + M.Content + TEXT("\n");
+					}
+					continue;
+				}
+
+				if (M.Role == TEXT("tool"))
+				{
+					NewTranscript += TEXT("[tool_result] ") + M.Content.Left(12000) + TEXT("\n");
 					continue;
 				}
 
@@ -455,6 +484,25 @@ public:
 					FAgentMessage M;
 					MO->TryGetStringField(TEXT("role"), M.Role);
 					MO->TryGetStringField(TEXT("content"), M.Content);
+					MO->TryGetStringField(TEXT("toolCallId"), M.ToolCallId);
+
+					const TArray<TSharedPtr<FJsonValue>>* ToolCallsArr = nullptr;
+					if (MO->TryGetArrayField(TEXT("toolCalls"), ToolCallsArr) && ToolCallsArr)
+					{
+						for (const TSharedPtr<FJsonValue>& TCV : *ToolCallsArr)
+						{
+							const TSharedPtr<FJsonObject> TCObj = TCV.IsValid() ? TCV->AsObject() : nullptr;
+							if (!TCObj.IsValid())
+							{
+								continue;
+							}
+							FAgentMessage::FAgentToolCall TC;
+							TCObj->TryGetStringField(TEXT("id"), TC.Id);
+							TCObj->TryGetStringField(TEXT("name"), TC.Name);
+							TCObj->TryGetStringField(TEXT("argumentsJson"), TC.ArgumentsJson);
+							M.ToolCalls.Add(MoveTemp(TC));
+						}
+					}
 					if (!M.Role.IsEmpty())
 					{
 						C.Messages.Add(M);
@@ -497,6 +545,23 @@ public:
 				auto MO = MakeShared<FJsonObject>();
 				MO->SetStringField(TEXT("role"), M.Role);
 				MO->SetStringField(TEXT("content"), M.Content);
+				if (!M.ToolCallId.IsEmpty())
+				{
+					MO->SetStringField(TEXT("toolCallId"), M.ToolCallId);
+				}
+				if (M.ToolCalls.Num() > 0)
+				{
+					TArray<TSharedPtr<FJsonValue>> TCArray;
+					for (const FAgentMessage::FAgentToolCall& TC : M.ToolCalls)
+					{
+						auto TCObj = MakeShared<FJsonObject>();
+						if (!TC.Id.IsEmpty()) { TCObj->SetStringField(TEXT("id"), TC.Id); }
+						TCObj->SetStringField(TEXT("name"), TC.Name);
+						TCObj->SetStringField(TEXT("argumentsJson"), TC.ArgumentsJson);
+						TCArray.Add(MakeShared<FJsonValueObject>(TCObj));
+					}
+					MO->SetArrayField(TEXT("toolCalls"), TCArray);
+				}
 				MsgArr.Add(MakeShared<FJsonValueObject>(MO));
 			}
 			Obj->SetArrayField(TEXT("messages"), MsgArr);
@@ -1423,7 +1488,7 @@ public:
 		{
 			const FString S = MaxStepsBox->GetText().ToString().TrimStartAndEnd();
 			MaxSteps = FCString::Atoi(*S);
-			MaxSteps = FMath::Clamp(MaxSteps, 1, 200);
+			MaxSteps = FMath::Clamp(MaxSteps, 1, 500);
 			MaxStepsBox->SetText(FText::AsNumber(MaxSteps));
 		}
 		Settings->Provider = Provider;
@@ -1452,7 +1517,287 @@ public:
 		return Url + TEXT("/chat/completions");
 	}
 
-	static FString SerializeMessagesOpenAI(const TArray<FAgentMessage>& Messages, const FString& Model, float Temperature)
+	static void BuildOpenAITools(TArray<TSharedPtr<FJsonValue>>& OutTools)
+	{
+		auto MakeTool = [](const FString& Name, const FString& Description, const TSharedPtr<FJsonObject>& Parameters)
+		{
+			auto ToolRoot = MakeShared<FJsonObject>();
+			ToolRoot->SetStringField(TEXT("type"), TEXT("function"));
+
+			auto Func = MakeShared<FJsonObject>();
+			Func->SetStringField(TEXT("name"), Name);
+			Func->SetStringField(TEXT("description"), Description);
+			Func->SetObjectField(TEXT("parameters"), Parameters);
+			ToolRoot->SetObjectField(TEXT("function"), Func);
+
+			return MakeShared<FJsonValueObject>(ToolRoot);
+		};
+
+		auto EmptyObjSchema = []()
+		{
+			auto Schema = MakeShared<FJsonObject>();
+			Schema->SetStringField(TEXT("type"), TEXT("object"));
+			Schema->SetBoolField(TEXT("additionalProperties"), false);
+			return Schema;
+		};
+
+		// Minimal-but-useful set (Blueprint/AI/Selection). Add more over time.
+		OutTools.Add(MakeTool(TEXT("project.get_name"), TEXT("Return the project name."), EmptyObjSchema()));
+		OutTools.Add(MakeTool(TEXT("project.get_directory"), TEXT("Return the current Unreal project directory."), EmptyObjSchema()));
+		OutTools.Add(MakeTool(TEXT("editor.get_selected_actors"), TEXT("List selected actor names in the editor."), EmptyObjSchema()));
+		OutTools.Add(MakeTool(TEXT("editor.get_selected_actor_details"), TEXT("Get details for selected actors (class, path, skeletal mesh info)."), EmptyObjSchema()));
+
+		{
+			auto Schema = EmptyObjSchema();
+			auto Props = MakeShared<FJsonObject>();
+
+			auto AssetPathProp = MakeShared<FJsonObject>();
+			AssetPathProp->SetStringField(TEXT("type"), TEXT("string"));
+			AssetPathProp->SetNumberField(TEXT("minLength"), 1);
+			Props->SetObjectField(TEXT("assetPath"), AssetPathProp);
+
+			auto ReplaceProp = MakeShared<FJsonObject>();
+			ReplaceProp->SetStringField(TEXT("type"), TEXT("boolean"));
+			Props->SetObjectField(TEXT("replaceActor"), ReplaceProp);
+
+			auto OpenProp = MakeShared<FJsonObject>();
+			OpenProp->SetStringField(TEXT("type"), TEXT("boolean"));
+			Props->SetObjectField(TEXT("openBlueprint"), OpenProp);
+
+			Schema->SetObjectField(TEXT("properties"), Props);
+			TArray<TSharedPtr<FJsonValue>> ReqArr;
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("assetPath")));
+			Schema->SetArrayField(TEXT("required"), ReqArr);
+
+			OutTools.Add(MakeTool(TEXT("editor.create_blueprint_from_selected_actor"), TEXT("Create a Blueprint from the single currently selected actor. Optionally replace the actor in the level."), Schema));
+		}
+
+		{
+			auto Schema = EmptyObjSchema();
+			auto Props = MakeShared<FJsonObject>();
+			auto AnimBPProp = MakeShared<FJsonObject>();
+			AnimBPProp->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("animBlueprintClassPath"), AnimBPProp);
+
+			auto AnimAssetProp = MakeShared<FJsonObject>();
+			AnimAssetProp->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("animationAssetPath"), AnimAssetProp);
+
+			Schema->SetObjectField(TEXT("properties"), Props);
+			OutTools.Add(MakeTool(TEXT("editor.set_selected_skeletal_animation"), TEXT("Set animation on the first SkeletalMeshComponent of the single selected actor (AnimBP class or animation asset)."), Schema));
+		}
+
+		{
+			auto Schema = EmptyObjSchema();
+			auto Props = MakeShared<FJsonObject>();
+
+			auto PackagePathProp = MakeShared<FJsonObject>();
+			PackagePathProp->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("packagePath"), PackagePathProp);
+
+			auto ClassPathsProp = MakeShared<FJsonObject>();
+			ClassPathsProp->SetStringField(TEXT("type"), TEXT("array"));
+			auto ClassItems = MakeShared<FJsonObject>();
+			ClassItems->SetStringField(TEXT("type"), TEXT("string"));
+			ClassPathsProp->SetObjectField(TEXT("items"), ClassItems);
+			Props->SetObjectField(TEXT("classPaths"), ClassPathsProp);
+
+			auto LimitProp = MakeShared<FJsonObject>();
+			LimitProp->SetStringField(TEXT("type"), TEXT("number"));
+			Props->SetObjectField(TEXT("limit"), LimitProp);
+
+			Schema->SetObjectField(TEXT("properties"), Props);
+			OutTools.Add(MakeTool(TEXT("asset.search"), TEXT("Search assets under a content path (defaults to /Game)."), Schema));
+		}
+
+		{
+			auto Schema = EmptyObjSchema();
+			auto Props = MakeShared<FJsonObject>();
+
+			auto AssetPathProp = MakeShared<FJsonObject>();
+			AssetPathProp->SetStringField(TEXT("type"), TEXT("string"));
+			AssetPathProp->SetNumberField(TEXT("minLength"), 1);
+			Props->SetObjectField(TEXT("assetPath"), AssetPathProp);
+
+			auto ParentProp = MakeShared<FJsonObject>();
+			ParentProp->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("parentClassPath"), ParentProp);
+
+			Schema->SetObjectField(TEXT("properties"), Props);
+			TArray<TSharedPtr<FJsonValue>> ReqArr;
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("assetPath")));
+			Schema->SetArrayField(TEXT("required"), ReqArr);
+
+			OutTools.Add(MakeTool(TEXT("asset.create_blueprint"), TEXT("Create a Blueprint asset at /Game/..."), Schema));
+		}
+
+		{
+			auto Schema = EmptyObjSchema();
+			auto Props = MakeShared<FJsonObject>();
+			auto AssetPathProp = MakeShared<FJsonObject>();
+			AssetPathProp->SetStringField(TEXT("type"), TEXT("string"));
+			AssetPathProp->SetNumberField(TEXT("minLength"), 1);
+			Props->SetObjectField(TEXT("assetPath"), AssetPathProp);
+			Schema->SetObjectField(TEXT("properties"), Props);
+			TArray<TSharedPtr<FJsonValue>> ReqArr;
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("assetPath")));
+			Schema->SetArrayField(TEXT("required"), ReqArr);
+
+			OutTools.Add(MakeTool(TEXT("ai.create_behavior_tree"), TEXT("Create a BehaviorTree asset at /Game/..."), Schema));
+			OutTools.Add(MakeTool(TEXT("ai.create_blackboard"), TEXT("Create a BlackboardData asset at /Game/..."), Schema));
+		}
+
+		{
+			auto Schema = EmptyObjSchema();
+			auto Props = MakeShared<FJsonObject>();
+			auto BpProp = MakeShared<FJsonObject>();
+			BpProp->SetStringField(TEXT("type"), TEXT("string"));
+			BpProp->SetNumberField(TEXT("minLength"), 1);
+			Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+			Schema->SetObjectField(TEXT("properties"), Props);
+			TArray<TSharedPtr<FJsonValue>> ReqArr;
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+			Schema->SetArrayField(TEXT("required"), ReqArr);
+			OutTools.Add(MakeTool(TEXT("blueprint.compile"), TEXT("Compile a Blueprint asset."), Schema));
+		}
+
+		{
+			auto Schema = EmptyObjSchema();
+			auto Props = MakeShared<FJsonObject>();
+			auto BpProp = MakeShared<FJsonObject>();
+			BpProp->SetStringField(TEXT("type"), TEXT("string"));
+			BpProp->SetNumberField(TEXT("minLength"), 1);
+			Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+			auto GraphNameProp = MakeShared<FJsonObject>();
+			GraphNameProp->SetStringField(TEXT("type"), TEXT("string"));
+			GraphNameProp->SetNumberField(TEXT("minLength"), 1);
+			Props->SetObjectField(TEXT("graphName"), GraphNameProp);
+			auto XProp = MakeShared<FJsonObject>(); XProp->SetStringField(TEXT("type"), TEXT("number"));
+			auto YProp = MakeShared<FJsonObject>(); YProp->SetStringField(TEXT("type"), TEXT("number"));
+			Props->SetObjectField(TEXT("x"), XProp);
+			Props->SetObjectField(TEXT("y"), YProp);
+			Schema->SetObjectField(TEXT("properties"), Props);
+			TArray<TSharedPtr<FJsonValue>> ReqArr;
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("graphName")));
+			Schema->SetArrayField(TEXT("required"), ReqArr);
+			OutTools.Add(MakeTool(TEXT("blueprint.k2.add_begin_play"), TEXT("Add an Event BeginPlay node to a Blueprint EventGraph."), Schema));
+			OutTools.Add(MakeTool(TEXT("blueprint.k2.add_event_tick"), TEXT("Add an Event Tick node to a Blueprint EventGraph."), Schema));
+			OutTools.Add(MakeTool(TEXT("blueprint.k2.add_branch"), TEXT("Add a Branch node to a Blueprint graph."), Schema));
+		}
+
+		{
+			auto Schema = EmptyObjSchema();
+			auto Props = MakeShared<FJsonObject>();
+			auto BpProp = MakeShared<FJsonObject>();
+			BpProp->SetStringField(TEXT("type"), TEXT("string"));
+			BpProp->SetNumberField(TEXT("minLength"), 1);
+			Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+			auto GraphNameProp = MakeShared<FJsonObject>();
+			GraphNameProp->SetStringField(TEXT("type"), TEXT("string"));
+			GraphNameProp->SetNumberField(TEXT("minLength"), 1);
+			Props->SetObjectField(TEXT("graphName"), GraphNameProp);
+			auto FuncProp = MakeShared<FJsonObject>();
+			FuncProp->SetStringField(TEXT("type"), TEXT("string"));
+			FuncProp->SetNumberField(TEXT("minLength"), 1);
+			Props->SetObjectField(TEXT("functionPath"), FuncProp);
+			auto XProp = MakeShared<FJsonObject>(); XProp->SetStringField(TEXT("type"), TEXT("number"));
+			auto YProp = MakeShared<FJsonObject>(); YProp->SetStringField(TEXT("type"), TEXT("number"));
+			Props->SetObjectField(TEXT("x"), XProp);
+			Props->SetObjectField(TEXT("y"), YProp);
+			Schema->SetObjectField(TEXT("properties"), Props);
+			TArray<TSharedPtr<FJsonValue>> ReqArr;
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("graphName")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("functionPath")));
+			Schema->SetArrayField(TEXT("required"), ReqArr);
+			OutTools.Add(MakeTool(TEXT("blueprint.k2.add_call_function"), TEXT("Add a CallFunction node by function path, e.g. /Script/Engine.KismetSystemLibrary:Delay"), Schema));
+		}
+
+		{
+			auto Schema = EmptyObjSchema();
+			auto Props = MakeShared<FJsonObject>();
+			auto BpProp = MakeShared<FJsonObject>();
+			BpProp->SetStringField(TEXT("type"), TEXT("string"));
+			BpProp->SetNumberField(TEXT("minLength"), 1);
+			Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+			auto GraphNameProp = MakeShared<FJsonObject>();
+			GraphNameProp->SetStringField(TEXT("type"), TEXT("string"));
+			GraphNameProp->SetNumberField(TEXT("minLength"), 1);
+			Props->SetObjectField(TEXT("graphName"), GraphNameProp);
+			auto FromNodeProp = MakeShared<FJsonObject>(); FromNodeProp->SetStringField(TEXT("type"), TEXT("string"));
+			auto FromPinProp = MakeShared<FJsonObject>(); FromPinProp->SetStringField(TEXT("type"), TEXT("string"));
+			auto ToNodeProp = MakeShared<FJsonObject>(); ToNodeProp->SetStringField(TEXT("type"), TEXT("string"));
+			auto ToPinProp = MakeShared<FJsonObject>(); ToPinProp->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("fromNodeGuid"), FromNodeProp);
+			Props->SetObjectField(TEXT("fromPin"), FromPinProp);
+			Props->SetObjectField(TEXT("toNodeGuid"), ToNodeProp);
+			Props->SetObjectField(TEXT("toPin"), ToPinProp);
+			auto CompileProp = MakeShared<FJsonObject>(); CompileProp->SetStringField(TEXT("type"), TEXT("boolean"));
+			Props->SetObjectField(TEXT("compile"), CompileProp);
+			Schema->SetObjectField(TEXT("properties"), Props);
+			TArray<TSharedPtr<FJsonValue>> ReqArr;
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("graphName")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("fromNodeGuid")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("fromPin")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("toNodeGuid")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("toPin")));
+			Schema->SetArrayField(TEXT("required"), ReqArr);
+			OutTools.Add(MakeTool(TEXT("blueprint.k2.connect_pins"), TEXT("Connect two pins by node GUID + pin name."), Schema));
+		}
+
+		{
+			auto Schema = EmptyObjSchema();
+			auto Props = MakeShared<FJsonObject>();
+			auto BpProp = MakeShared<FJsonObject>(); BpProp->SetStringField(TEXT("type"), TEXT("string")); BpProp->SetNumberField(TEXT("minLength"), 1);
+			auto GraphNameProp = MakeShared<FJsonObject>(); GraphNameProp->SetStringField(TEXT("type"), TEXT("string")); GraphNameProp->SetNumberField(TEXT("minLength"), 1);
+			auto NodeProp = MakeShared<FJsonObject>(); NodeProp->SetStringField(TEXT("type"), TEXT("string")); NodeProp->SetNumberField(TEXT("minLength"), 1);
+			auto PinProp = MakeShared<FJsonObject>(); PinProp->SetStringField(TEXT("type"), TEXT("string")); PinProp->SetNumberField(TEXT("minLength"), 1);
+			auto ValueProp = MakeShared<FJsonObject>(); ValueProp->SetStringField(TEXT("type"), TEXT("string"));
+			auto AsObjProp = MakeShared<FJsonObject>(); AsObjProp->SetStringField(TEXT("type"), TEXT("boolean"));
+			auto CompileProp = MakeShared<FJsonObject>(); CompileProp->SetStringField(TEXT("type"), TEXT("boolean"));
+			Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+			Props->SetObjectField(TEXT("graphName"), GraphNameProp);
+			Props->SetObjectField(TEXT("nodeGuid"), NodeProp);
+			Props->SetObjectField(TEXT("pin"), PinProp);
+			Props->SetObjectField(TEXT("value"), ValueProp);
+			Props->SetObjectField(TEXT("asObjectPath"), AsObjProp);
+			Props->SetObjectField(TEXT("compile"), CompileProp);
+			Schema->SetObjectField(TEXT("properties"), Props);
+			TArray<TSharedPtr<FJsonValue>> ReqArr;
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("graphName")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("nodeGuid")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("pin")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("value")));
+			Schema->SetArrayField(TEXT("required"), ReqArr);
+			OutTools.Add(MakeTool(TEXT("blueprint.k2.set_pin_default"), TEXT("Set a pin default value by node GUID + pin name."), Schema));
+		}
+
+		{
+			auto Schema = EmptyObjSchema();
+			auto Props = MakeShared<FJsonObject>();
+			auto BpProp = MakeShared<FJsonObject>(); BpProp->SetStringField(TEXT("type"), TEXT("string")); BpProp->SetNumberField(TEXT("minLength"), 1);
+			auto PropName = MakeShared<FJsonObject>(); PropName->SetStringField(TEXT("type"), TEXT("string")); PropName->SetNumberField(TEXT("minLength"), 1);
+			auto ValueType = MakeShared<FJsonObject>(); ValueType->SetStringField(TEXT("type"), TEXT("string"));
+			auto ValueStr = MakeShared<FJsonObject>(); ValueStr->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("blueprintPath"), BpProp);
+			Props->SetObjectField(TEXT("propertyName"), PropName);
+			Props->SetObjectField(TEXT("valueType"), ValueType);
+			Props->SetObjectField(TEXT("value"), ValueStr);
+			Schema->SetObjectField(TEXT("properties"), Props);
+			TArray<TSharedPtr<FJsonValue>> ReqArr;
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("blueprintPath")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("propertyName")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("valueType")));
+			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("value")));
+			Schema->SetArrayField(TEXT("required"), ReqArr);
+			OutTools.Add(MakeTool(TEXT("blueprint.set_cdo_property"), TEXT("Set a Blueprint class default object (CDO) property by name."), Schema));
+		}
+	}
+
+	static FString SerializeMessagesOpenAI(const TArray<FAgentMessage>& Messages, const FString& Model, float Temperature, bool bIncludeTools)
 	{
 		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 		Root->SetStringField(TEXT("model"), Model);
@@ -1464,9 +1809,40 @@ public:
 			auto Obj = MakeShared<FJsonObject>();
 			Obj->SetStringField(TEXT("role"), M.Role);
 			Obj->SetStringField(TEXT("content"), M.Content);
+
+			if (M.Role == TEXT("assistant") && M.ToolCalls.Num() > 0)
+			{
+				TArray<TSharedPtr<FJsonValue>> ToolCallsArr;
+				for (const FAgentMessage::FAgentToolCall& TC : M.ToolCalls)
+				{
+					auto TCObj = MakeShared<FJsonObject>();
+					if (!TC.Id.IsEmpty()) { TCObj->SetStringField(TEXT("id"), TC.Id); }
+					TCObj->SetStringField(TEXT("type"), TEXT("function"));
+					auto Func = MakeShared<FJsonObject>();
+					Func->SetStringField(TEXT("name"), TC.Name);
+					Func->SetStringField(TEXT("arguments"), TC.ArgumentsJson);
+					TCObj->SetObjectField(TEXT("function"), Func);
+					ToolCallsArr.Add(MakeShared<FJsonValueObject>(TCObj));
+				}
+				Obj->SetArrayField(TEXT("tool_calls"), ToolCallsArr);
+			}
+
+			if (M.Role == TEXT("tool") && !M.ToolCallId.IsEmpty())
+			{
+				Obj->SetStringField(TEXT("tool_call_id"), M.ToolCallId);
+			}
+
 			MsgArr.Add(MakeShared<FJsonValueObject>(Obj));
 		}
 		Root->SetArrayField(TEXT("messages"), MsgArr);
+
+		if (bIncludeTools)
+		{
+			TArray<TSharedPtr<FJsonValue>> Tools;
+			BuildOpenAITools(Tools);
+			Root->SetArrayField(TEXT("tools"), Tools);
+			Root->SetStringField(TEXT("tool_choice"), TEXT("auto"));
+		}
 
 		FString Body;
 		auto Writer = TJsonWriterFactory<>::Create(&Body);
@@ -1500,7 +1876,7 @@ public:
 		return Body;
 	}
 
-	static bool ExtractAssistantContent(const FString& ResponseBody, FString& OutContent)
+	static bool ExtractOpenAIMessage(const FString& ResponseBody, FString& OutContent, TArray<FAgentMessage::FAgentToolCall>& OutToolCalls)
 	{
 		TSharedPtr<FJsonObject> Root;
 		if (!TryParseJsonObject(ResponseBody, Root))
@@ -1526,7 +1902,38 @@ public:
 			return false;
 		}
 
-		return Msg->TryGetStringField(TEXT("content"), OutContent);
+		OutContent.Empty();
+		Msg->TryGetStringField(TEXT("content"), OutContent);
+
+		OutToolCalls.Reset();
+		const TArray<TSharedPtr<FJsonValue>>* ToolCalls = nullptr;
+		if (Msg->TryGetArrayField(TEXT("tool_calls"), ToolCalls) && ToolCalls)
+		{
+			for (const TSharedPtr<FJsonValue>& V : *ToolCalls)
+			{
+				const TSharedPtr<FJsonObject> TCObj = V.IsValid() ? V->AsObject() : nullptr;
+				if (!TCObj.IsValid())
+				{
+					continue;
+				}
+
+				FAgentMessage::FAgentToolCall TC;
+				TCObj->TryGetStringField(TEXT("id"), TC.Id);
+
+				const TSharedPtr<FJsonObject>* FuncObjPtr = nullptr;
+				if (TCObj->TryGetObjectField(TEXT("function"), FuncObjPtr) && FuncObjPtr && (*FuncObjPtr).IsValid())
+				{
+					(*FuncObjPtr)->TryGetStringField(TEXT("name"), TC.Name);
+					(*FuncObjPtr)->TryGetStringField(TEXT("arguments"), TC.ArgumentsJson);
+				}
+				if (!TC.Name.IsEmpty())
+				{
+					OutToolCalls.Add(MoveTemp(TC));
+				}
+			}
+		}
+
+		return true;
 	}
 
 	static bool ExtractAssistantContentOllama(const FString& ResponseBody, FString& OutContent)
@@ -1602,9 +2009,10 @@ public:
 			Req->SetHeader(TEXT("Authorization"), FString::Printf(TEXT("Bearer %s"), *ApiKey));
 		}
 
+		const bool bIncludeTools = (Provider == EUEAgentProvider::OpenAICompatible) && !bDisableToolCalling;
 		const FString Body = (Provider == EUEAgentProvider::OllamaCloud)
 			? SerializeMessagesOllamaCloud(Messages, Model, Temperature)
-			: SerializeMessagesOpenAI(Messages, Model, Temperature);
+			: SerializeMessagesOpenAI(Messages, Model, Temperature, bIncludeTools);
 		Req->SetContentAsString(Body);
 
 		const TWeakPtr<SUEAgentBridgePanel> SelfWeak = StaticCastSharedRef<SUEAgentBridgePanel>(AsShared());
@@ -1645,21 +2053,150 @@ public:
 			{
 				AppendTranscript(TEXT("[llm] unauthorized: check API Key (or choose a local preset that doesn't require auth)"));
 			}
-			AppendTranscript(Resp->GetContentAsString().Left(4000));
+
+			const FString ErrBody = Resp->GetContentAsString();
+			AppendTranscript(ErrBody.Left(4000));
+
+			// Fallback: some "OpenAI-compatible" providers don't support tools/tool_choice.
+			if (Provider == EUEAgentProvider::OpenAICompatible && !bDisableToolCalling && Code == 400)
+			{
+				const FString Lower = ErrBody.ToLower();
+				if (Lower.Contains(TEXT("tools")) || Lower.Contains(TEXT("tool_choice")) || Lower.Contains(TEXT("tool choice")))
+				{
+					bDisableToolCalling = true;
+					StepsRemaining = FMath::Clamp(StepsRemaining + 1, 0, 500); // compensate one step for the retry
+					AppendTranscript(TEXT("[llm] provider rejected tool calling; retrying without tools"));
+					AgentStep();
+					return;
+				}
+			}
+
 			bBusy = false;
 			return;
 		}
 
 		const FString RespBody = Resp->GetContentAsString();
 		FString Content;
+		TArray<FAgentMessage::FAgentToolCall> OpenAIToolCalls;
 		const bool bExtracted = (Provider == EUEAgentProvider::OllamaCloud)
 			? ExtractAssistantContentOllama(RespBody, Content)
-			: ExtractAssistantContent(RespBody, Content);
+			: ExtractOpenAIMessage(RespBody, Content, OpenAIToolCalls);
 		if (!bExtracted)
 		{
 			AppendTranscript(TEXT("[llm] invalid response"));
 			AppendTranscript(RespBody.Left(2000));
 			bBusy = false;
+			return;
+		}
+
+		// OpenAI-style function calling
+		if (Provider == EUEAgentProvider::OpenAICompatible && OpenAIToolCalls.Num() > 0)
+		{
+			// Add assistant tool_call message
+			FAgentMessage AssistantMsg;
+			AssistantMsg.Role = TEXT("assistant");
+			AssistantMsg.Content = Content;
+			AssistantMsg.ToolCalls = OpenAIToolCalls;
+			Messages.Add(AssistantMsg);
+
+			// Execute only the first tool call (the model can request more in subsequent steps)
+			FAgentMessage::FAgentToolCall& TC = Messages.Last().ToolCalls[0];
+			FString ToolName = TC.Name;
+			FString ArgsJson = TC.ArgumentsJson;
+
+			TSharedPtr<FJsonObject> InputObj = MakeShared<FJsonObject>();
+			if (!ArgsJson.IsEmpty())
+			{
+				TSharedPtr<FJsonObject> Parsed;
+				if (TryParseJsonObject(ArgsJson, Parsed) && Parsed.IsValid())
+				{
+					InputObj = Parsed;
+				}
+				else
+				{
+					// Some models return arguments as non-object JSON; fall back to empty object.
+					InputObj = MakeShared<FJsonObject>();
+				}
+			}
+
+			// Auto-fix common mistakes (MCP-like robustness)
+			{
+				FString AssetPath;
+				if (ToolName.Equals(TEXT("asset.create_blueprint"), ESearchCase::IgnoreCase) && InputObj.IsValid() && InputObj->TryGetStringField(TEXT("assetPath"), AssetPath))
+				{
+					if (AssetPath.Contains(TEXT("/BT_")) || AssetPath.Contains(TEXT("/BT-")) || AssetPath.Contains(TEXT("BehaviorTree")))
+					{
+						ToolName = TEXT("ai.create_behavior_tree");
+					}
+					else if (AssetPath.Contains(TEXT("/BB_")) || AssetPath.Contains(TEXT("/BB-")) || AssetPath.Contains(TEXT("Blackboard")))
+					{
+						ToolName = TEXT("ai.create_blackboard");
+					}
+					else if (AssetPath.Contains(TEXT("AIController"), ESearchCase::IgnoreCase) && !InputObj->HasField(TEXT("parentClassPath")))
+					{
+						InputObj->SetStringField(TEXT("parentClassPath"), TEXT("/Script/AIModule.AIController"));
+					}
+				}
+
+				// Ensure required fields exist where possible
+				if ((ToolName.Equals(TEXT("asset.create_blueprint"), ESearchCase::IgnoreCase) ||
+					 ToolName.Equals(TEXT("ai.create_behavior_tree"), ESearchCase::IgnoreCase) ||
+					 ToolName.Equals(TEXT("ai.create_blackboard"), ESearchCase::IgnoreCase)) &&
+					InputObj.IsValid() && !InputObj->HasField(TEXT("assetPath")))
+				{
+					InputObj->SetStringField(TEXT("assetPath"), TEXT("/Game/test/AutoAsset"));
+				}
+
+				TC.Name = ToolName; // keep history consistent
+			}
+
+			FToolExecResult ToolRes = ExecuteTool(ToolName, InputObj);
+
+			// Create tool_result payload (string) as the tool message content.
+			TSharedPtr<FJsonObject> ToolResultObj = MakeShared<FJsonObject>();
+			ToolResultObj->SetStringField(TEXT("type"), TEXT("tool_result"));
+			ToolResultObj->SetStringField(TEXT("toolName"), ToolName);
+			ToolResultObj->SetNumberField(TEXT("statusCode"), ToolRes.StatusCode);
+
+			FString CleanBody = ToolRes.BodyJson;
+			{
+				FString Extracted;
+				if (TryExtractFirstJsonObject(CleanBody, Extracted))
+				{
+					CleanBody = Extracted;
+				}
+			}
+
+			TSharedPtr<FJsonObject> BodyObj;
+			if (TryParseJsonObject(CleanBody, BodyObj))
+			{
+				ToolResultObj->SetObjectField(TEXT("body"), BodyObj);
+			}
+			else
+			{
+				ToolResultObj->SetStringField(TEXT("bodyText"), CleanBody);
+			}
+
+			FString ToolResultStr;
+			auto Writer = TJsonWriterFactory<>::Create(&ToolResultStr);
+			FJsonSerializer::Serialize(ToolResultObj.ToSharedRef(), Writer);
+
+			FAgentMessage ToolMsg;
+			ToolMsg.Role = TEXT("tool");
+			ToolMsg.ToolCallId = TC.Id;
+			ToolMsg.Content = ToolResultStr;
+			Messages.Add(ToolMsg);
+
+			if (FConversation* C = GetActiveConversation())
+			{
+				C->Messages = Messages;
+				C->UpdatedAt = FDateTime::UtcNow();
+				RefreshConversationList();
+				SaveConversations();
+				SyncTranscriptFromConversation();
+			}
+
+			AgentStep();
 			return;
 		}
 
@@ -1808,6 +2345,7 @@ private:
 		}
 
 		bBusy = true;
+		bDisableToolCalling = false;
 		const int32 RequestedSteps = (MaxSteps <= 0) ? 200 : MaxSteps;
 		StepsRemaining = FMath::Clamp(RequestedSteps, 1, 500);
 
@@ -1891,6 +2429,7 @@ private:
 	bool bBusy = false;
 	int32 StepsRemaining = 0;
 	TArray<FAgentMessage> Messages;
+	bool bDisableToolCalling = false;
 
 	FHttpRequestPtr ActiveRequest;
 
