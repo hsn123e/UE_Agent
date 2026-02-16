@@ -2,10 +2,9 @@
 
 ## العربية
 
-إضافة Editor توفر:
+إضافة لمحرر Unreal Engine مع واجهة داخل المحرر:
 
-- واجهة داخل المحرر: `Window → UE Agent`
-- HTTP Bridge محلي على `localhost`
+`Window → UE Agent`
 
 ### التثبيت
 
@@ -35,10 +34,9 @@
 
 ## English
 
-Editor plugin that provides:
+Unreal Editor plugin with an in-editor UI:
 
-- In-editor UI: `Window → UE Agent`
-- Local HTTP bridge on `localhost`
+`Window → UE Agent`
 
 ### Install
 
@@ -63,6 +61,7 @@ Environment variables (optional):
 - `GET /ue-agent/health`
 - `GET /ue-agent/tools`
 - `POST /ue-agent/tools/call`
+
 
 
 

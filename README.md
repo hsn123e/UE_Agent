@@ -2,52 +2,42 @@
 
 ## العربية
 
-`UEAgentBridge` هي إضافة (Plugin) داخل محرر Unreal Engine توفر:
+`UEAgentBridge` إضافة (Plugin) لمحرر Unreal Engine.
 
-- تبويب `Window → UE Agent` (دردشة + محادثات محفوظة + إعدادات).
-- أدوات Editor/Blueprint/UMG يمكن للـ LLM استخدامها.
-- HTTP Bridge محلي على `localhost` (اختياري) لاستدعاء الأدوات من خارج المحرر.
+الفكرة: اربط الإضافة مع **أي مزوّد/نموذج** يدعم واجهة **OpenAI-compatible** (أو اختر Preset جاهز)، ثم اكتب أوامر نصية لتنفيذ مهام داخل المحرر.
 
-### المتطلبات
+### التركيب
 
-- Unreal Engine 5.7.x (تم الاختبار على 5.7.2)
-- Windows 10/11
-- لبناء إضافة C++: Visual Studio Build Tools 2022 + Windows 10 SDK
-
-### التثبيت داخل مشروعك
-
-انسخ:
+1) انسخ مجلد `UEAgentBridge` إلى مشروعك:
 
 `UEAgentBridge` → `<YourProject>/Plugins/UEAgentBridge`
 
-ثم افتح المشروع وفعّل الإضافة من:
+2) افتح المشروع وفعّل الإضافة:
 
 `Edit → Plugins → UEAgentBridge`
 
-### التشغيل
+3) أعد تشغيل المحرر إذا طُلب ذلك.
 
-داخل المحرر:
+### الاستخدام
+
+1) افتح:
 
 `Window → UE Agent`
 
-### الإعدادات (LLM)
+2) من `Settings`:
+- اختر `Provider preset` أو `Custom` لمزوّدك الخاص
+- ضع `API Key` إذا كان مطلوبًا
+- اضغط `Refresh` لتحميل قائمة `Model` (إذا كان المزوّد يدعم ذلك)
+- اختر الموديل واضغط `Save`
 
-داخل صفحة `Settings`:
+3) اكتب طلبك واضغط Enter.
+- إذا كان طلبك يعتمد على تحديد Actor، حدّده أولًا في الـ Outliner.
+- زر `Selection → Describe` يساعد على إعطاء تفاصيل عن الـ Actor المحدد.
 
-- اختر `Provider preset`
-- أدخل `API Key` (إذا كان مطلوبًا)
-- اختر `Model` (أو اضغط `Refresh` لجلب قائمة الموديلات)
-- اضغط `Save`
+### تشغيل نموذج محلي (Local)
 
-**Ollama (Local)**
-- اختر preset: `Ollama (Local)`
-- لا تحتاج API Key
-- اضغط `Refresh` ثم اختر موديل من القائمة
-
-**Ollama Cloud**
-- اختر preset: `Ollama Cloud`
-- ضع API Key من `ollama.com/settings/keys`
-- اضغط `Refresh` واختر موديل
+- اختر preset محلي مثل `Ollama (Local)` أو `LM Studio (Local)` ثم اضغط `Refresh` واختر الموديل.
+- إذا لم تظهر قائمة موديلات، اكتب اسم الموديل يدويًا في `Model`.
 
 ### حفظ المحادثات
 
@@ -57,14 +47,14 @@
 
 ### إعادة البناء (Build)
 
-أغلق Unreal Editor ثم:
+أغلق Unreal Editor ثم نفّذ:
 
 ```powershell
 & "C:\Unreal Engine\UE_5.7\Engine\Build\BatchFiles\Build.bat" UnrealEditor Win64 Development `
   -Project="C:\Unreal Projects\X555\X555.uproject" -WaitMutex -NoHotReload
 ```
 
-### الأمان
+### ملاحظة أمان
 
 الجسر مصمم للاستخدام المحلي فقط (`localhost`). لا تفتحه على الشبكة ولا تشارك مفاتيح API.
 
@@ -72,48 +62,47 @@
 
 ## English
 
-`UEAgentBridge` is an Unreal Editor plugin that provides:
+`UEAgentBridge` is an Unreal Editor plugin.
 
-- `Window → UE Agent` tab (chat + persistent conversations + settings).
-- Editor/Blueprint/UMG tools the LLM can call.
-- Optional local HTTP bridge on `localhost` to call tools from outside the editor.
+Idea: connect it to **any provider/model** that supports an **OpenAI-compatible** API (or pick a preset), then write natural-language requests to perform actions inside the editor.
 
-### Requirements
+### Install
 
-- Unreal Engine 5.7.x (tested on 5.7.2)
-- Windows 10/11
-- To build the C++ plugin: Visual Studio Build Tools 2022 + Windows 10 SDK
-
-### Install into your project
-
-Copy:
+1) Copy `UEAgentBridge` into your project:
 
 `UEAgentBridge` → `<YourProject>/Plugins/UEAgentBridge`
 
-Then enable in:
+2) Enable the plugin:
 
 `Edit → Plugins → UEAgentBridge`
 
-### Run
+3) Restart the editor if prompted.
 
-In the editor:
+### Use
+
+1) Open:
 
 `Window → UE Agent`
 
-### Settings (LLM)
+2) In `Settings`:
+- pick a `Provider preset` or `Custom`
+- enter an `API Key` if required
+- press `Refresh` to load the `Model` list (if supported)
+- select a model and press `Save`
 
-In the `Settings` page:
+3) Type your request and press Enter.
+- If your request depends on an actor selection, select it in the Outliner first.
+- Use `Selection → Describe` to capture details about the selected actor.
 
-- Pick a `Provider preset`
-- Enter an `API Key` (if required)
-- Pick a `Model` (or press `Refresh` to load model list)
-- Press `Save`
+### Run a local model
+
+- Pick a local preset like `Ollama (Local)` or `LM Studio (Local)`, then press `Refresh` and choose a model.
+- If model listing isn’t available, type the model name manually in `Model`.
 
 ### Chat persistence
 
 Saved per project at:
 
 `<Project>/Saved/UEAgentBridge/conversations.json`
-
 
 
