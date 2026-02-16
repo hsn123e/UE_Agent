@@ -53,6 +53,7 @@ private:
 	bool HandleTool_BlueprintSetCDOProperty(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_AICreateBehaviorTree(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_AICreateBlackboard(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
+	bool HandleTool_AISetupWanderForSelectedActor(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_SkeletonListSockets(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_SkeletonAddSocket(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);
 	bool HandleTool_UmgCreateWidgetBlueprint(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete);

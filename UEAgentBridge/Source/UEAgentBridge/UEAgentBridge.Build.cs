@@ -21,6 +21,7 @@ public class UEAgentBridge : ModuleRules
 				"JsonUtilities",
 				"HTTPServer",
 				"AIModule",
+				"NavigationSystem",
 				"BehaviorTreeEditor",
 				"BlueprintGraph",
 				"Kismet",

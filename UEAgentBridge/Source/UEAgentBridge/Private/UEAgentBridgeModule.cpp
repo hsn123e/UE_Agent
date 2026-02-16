@@ -72,6 +72,14 @@
 #include "BehaviorTree/BlackboardData.h"
 #include "BehaviorTreeFactory.h"
 #include "BlackboardDataFactory.h"
+#include "BehaviorTree/Composites/BTComposite_Sequence.h"
+#include "BehaviorTree/Tasks/BTTask_MoveTo.h"
+#include "BehaviorTree/Tasks/BTTask_Wait.h"
+#include "BehaviorTree/Blackboard/BlackboardKeyType_Vector.h"
+#include "AIController.h"
+#include "NavigationSystem.h"
+
+#include "UEAgentBTTask_FindRandomReachablePoint.h"
 
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonWriter.h"
@@ -189,7 +197,7 @@ static FString GetAgentSystemPrompt()
 		"- editor.create_blueprint_from_selected_actor, editor.set_selected_skeletal_animation\n"
 		"- level.save_current, level.spawn_actor\n"
 		"- asset.search, asset.create_blueprint\n"
-		"- ai.create_behavior_tree, ai.create_blackboard\n"
+		"- ai.create_behavior_tree, ai.create_blackboard, ai.setup_wander_for_selected_actor\n"
 		"- skeleton.list_sockets, skeleton.add_socket\n"
 		"- blueprint.compile\n"
 		"- blueprint.get_graph_t3d, blueprint.paste_t3d\n"
@@ -1673,8 +1681,32 @@ public:
 			ReqArr.Add(MakeShared<FJsonValueString>(TEXT("assetPath")));
 			Schema->SetArrayField(TEXT("required"), ReqArr);
 
-			OutTools.Add(MakeTool(TEXT("ai.create_behavior_tree"), TEXT("Create a BehaviorTree asset at /Game/..."), Schema));
-			OutTools.Add(MakeTool(TEXT("ai.create_blackboard"), TEXT("Create a BlackboardData asset at /Game/..."), Schema));
+		OutTools.Add(MakeTool(TEXT("ai.create_behavior_tree"), TEXT("Create a BehaviorTree asset at /Game/..."), Schema));
+		OutTools.Add(MakeTool(TEXT("ai.create_blackboard"), TEXT("Create a BlackboardData asset at /Game/..."), Schema));
+	}
+
+		{
+			auto Schema = EmptyObjSchema();
+			auto Props = MakeShared<FJsonObject>();
+
+			auto FolderProp = MakeShared<FJsonObject>();
+			FolderProp->SetStringField(TEXT("type"), TEXT("string"));
+			Props->SetObjectField(TEXT("folder"), FolderProp);
+
+			auto RadiusProp = MakeShared<FJsonObject>();
+			RadiusProp->SetStringField(TEXT("type"), TEXT("number"));
+			Props->SetObjectField(TEXT("radius"), RadiusProp);
+
+			auto WaitMinProp = MakeShared<FJsonObject>();
+			WaitMinProp->SetStringField(TEXT("type"), TEXT("number"));
+			Props->SetObjectField(TEXT("waitMin"), WaitMinProp);
+
+			auto WaitMaxProp = MakeShared<FJsonObject>();
+			WaitMaxProp->SetStringField(TEXT("type"), TEXT("number"));
+			Props->SetObjectField(TEXT("waitMax"), WaitMaxProp);
+
+			Schema->SetObjectField(TEXT("properties"), Props);
+			OutTools.Add(MakeTool(TEXT("ai.setup_wander_for_selected_actor"), TEXT("Create a simple wander AI setup (BB/BT/AIController) under /Game/... and apply it to the selected Character immediately."), Schema));
 		}
 
 		{
@@ -3497,6 +3529,36 @@ bool FUEAgentBridgeModule::HandleTools(const FHttpServerRequest& Request, const 
 
 	{
 		auto Tool = MakeShared<FJsonObject>();
+		Tool->SetStringField(TEXT("name"), TEXT("ai.setup_wander_for_selected_actor"));
+		Tool->SetStringField(TEXT("description"), TEXT("Create a simple wander AI setup (BB/BT/AIController) under /Game/... and apply it to the selected Character immediately."));
+		auto Schema = MakeShared<FJsonObject>();
+		Schema->SetStringField(TEXT("type"), TEXT("object"));
+		Schema->SetBoolField(TEXT("additionalProperties"), false);
+		auto Props = MakeShared<FJsonObject>();
+
+		auto FolderProp = MakeShared<FJsonObject>();
+		FolderProp->SetStringField(TEXT("type"), TEXT("string"));
+		Props->SetObjectField(TEXT("folder"), FolderProp);
+
+		auto RadiusProp = MakeShared<FJsonObject>();
+		RadiusProp->SetStringField(TEXT("type"), TEXT("number"));
+		Props->SetObjectField(TEXT("radius"), RadiusProp);
+
+		auto WaitMinProp = MakeShared<FJsonObject>();
+		WaitMinProp->SetStringField(TEXT("type"), TEXT("number"));
+		Props->SetObjectField(TEXT("waitMin"), WaitMinProp);
+
+		auto WaitMaxProp = MakeShared<FJsonObject>();
+		WaitMaxProp->SetStringField(TEXT("type"), TEXT("number"));
+		Props->SetObjectField(TEXT("waitMax"), WaitMaxProp);
+
+		Schema->SetObjectField(TEXT("properties"), Props);
+		Tool->SetObjectField(TEXT("inputSchema"), Schema);
+		Tools.Add(MakeShared<FJsonValueObject>(Tool));
+	}
+
+	{
+		auto Tool = MakeShared<FJsonObject>();
 		Tool->SetStringField(TEXT("name"), TEXT("skeleton.list_sockets"));
 		Tool->SetStringField(TEXT("description"), TEXT("List sockets on a USkeleton asset."));
 		auto Schema = MakeShared<FJsonObject>();
@@ -4183,6 +4245,7 @@ bool FUEAgentBridgeModule::ExecuteToolForUI(const FString& ToolName, const TShar
 	else if (ToolKey == TEXT("asset.create_blueprint")) { HandleTool_AssetCreateBlueprint(Input, Cb); }
 	else if (ToolKey == TEXT("ai.create_behavior_tree")) { HandleTool_AICreateBehaviorTree(Input, Cb); }
 	else if (ToolKey == TEXT("ai.create_blackboard")) { HandleTool_AICreateBlackboard(Input, Cb); }
+	else if (ToolKey == TEXT("ai.setup_wander_for_selected_actor")) { HandleTool_AISetupWanderForSelectedActor(Input, Cb); }
 	else if (ToolKey == TEXT("skeleton.list_sockets")) { HandleTool_SkeletonListSockets(Input, Cb); }
 	else if (ToolKey == TEXT("skeleton.add_socket")) { HandleTool_SkeletonAddSocket(Input, Cb); }
 	else if (ToolKey == TEXT("blueprint.set_cdo_property")) { HandleTool_BlueprintSetCDOProperty(Input, Cb); }
@@ -4292,6 +4355,7 @@ bool FUEAgentBridgeModule::HandleToolCall(const FHttpServerRequest& Request, con
 		if (ToolKey == TEXT("asset.create_blueprint")) { HandleTool_AssetCreateBlueprint(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("ai.create_behavior_tree")) { HandleTool_AICreateBehaviorTree(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("ai.create_blackboard")) { HandleTool_AICreateBlackboard(InputObj, OnComplete); return; }
+		if (ToolKey == TEXT("ai.setup_wander_for_selected_actor")) { HandleTool_AISetupWanderForSelectedActor(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("skeleton.list_sockets")) { HandleTool_SkeletonListSockets(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("skeleton.add_socket")) { HandleTool_SkeletonAddSocket(InputObj, OnComplete); return; }
 		if (ToolKey == TEXT("blueprint.set_cdo_property")) { HandleTool_BlueprintSetCDOProperty(InputObj, OnComplete); return; }
@@ -6165,6 +6229,64 @@ static UObject* CreateAssetWithFactory(const FString& AssetPath, UClass* AssetCl
 	return NewAsset;
 }
 
+static FString NormalizeGameFolder(const FString& InFolder)
+{
+	FString Folder = InFolder;
+	Folder.TrimStartAndEndInline();
+	if (Folder.IsEmpty())
+	{
+		return TEXT("/Game/test");
+	}
+	if (!Folder.StartsWith(TEXT("/")))
+	{
+		Folder = TEXT("/") + Folder;
+	}
+	if (!Folder.StartsWith(TEXT("/Game")))
+	{
+		// Force under /Game to keep things consistent and safe.
+		Folder = TEXT("/Game/test");
+	}
+	while (Folder.EndsWith(TEXT("/")))
+	{
+		Folder.LeftChopInline(1);
+	}
+	return Folder;
+}
+
+static FString JoinAssetPath(const FString& Folder, const FString& AssetName)
+{
+	FString F = Folder;
+	if (F.EndsWith(TEXT("/")))
+	{
+		F.LeftChopInline(1);
+	}
+	return F + TEXT("/") + AssetName;
+}
+
+static bool SetBTTaskBlackboardKey(UBTTask_BlackboardBase* Task, const FName& KeyName)
+{
+	if (!Task)
+	{
+		return false;
+	}
+
+	FStructProperty* Prop = FindFProperty<FStructProperty>(Task->GetClass(), TEXT("BlackboardKey"));
+	if (!Prop)
+	{
+		return false;
+	}
+
+	void* Addr = Prop->ContainerPtrToValuePtr<void>(Task);
+	if (!Addr)
+	{
+		return false;
+	}
+
+	FBlackboardKeySelector* Selector = reinterpret_cast<FBlackboardKeySelector*>(Addr);
+	Selector->SelectedKeyName = KeyName;
+	return true;
+}
+
 bool FUEAgentBridgeModule::HandleTool_AICreateBehaviorTree(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
 {
 	auto Out = MakeShared<FJsonObject>();
@@ -6237,6 +6359,335 @@ bool FUEAgentBridgeModule::HandleTool_AICreateBlackboard(const TSharedPtr<FJsonO
 
 	Out->SetBoolField(TEXT("ok"), true);
 	Out->SetStringField(TEXT("result"), Asset->GetPathName());
+	OnComplete(JsonResponse(Out, 200));
+	return true;
+}
+
+bool FUEAgentBridgeModule::HandleTool_AISetupWanderForSelectedActor(const TSharedPtr<FJsonObject>& Input, const FHttpResultCallback& OnComplete)
+{
+	auto Out = MakeShared<FJsonObject>();
+
+	FString Folder = TEXT("/Game/test");
+	double Radius = 1200.0;
+	double WaitMin = 1.0;
+	double WaitMax = 3.0;
+
+	if (Input.IsValid())
+	{
+		Input->TryGetStringField(TEXT("folder"), Folder);
+		Input->TryGetNumberField(TEXT("radius"), Radius);
+		Input->TryGetNumberField(TEXT("waitMin"), WaitMin);
+		Input->TryGetNumberField(TEXT("waitMax"), WaitMax);
+	}
+
+	Folder = NormalizeGameFolder(Folder);
+	Radius = FMath::Clamp(Radius, 200.0, 20000.0);
+	WaitMin = FMath::Clamp(WaitMin, 0.0, 30.0);
+	WaitMax = FMath::Clamp(WaitMax, 0.0, 30.0);
+	if (WaitMax < WaitMin)
+	{
+		Swap(WaitMax, WaitMin);
+	}
+
+	// 1) Get selected actor and validate it is a Character/Pawn we can possess.
+	AActor* SelectedActor = nullptr;
+	if (GEditor)
+	{
+		USelection* Sel = GEditor->GetSelectedActors();
+		if (Sel && Sel->Num() == 1)
+		{
+			SelectedActor = Cast<AActor>(Sel->GetSelectedObject(0));
+		}
+	}
+
+	if (!SelectedActor)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("No single selected actor. Select exactly one Character in the Outliner."));
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	APawn* Pawn = Cast<APawn>(SelectedActor);
+	if (!Pawn)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Selected actor is not a Pawn/Character."));
+		Out->SetStringField(TEXT("actorClass"), SelectedActor->GetClass()->GetPathName());
+		OnComplete(JsonResponse(Out, 400));
+		return true;
+	}
+
+	// 2) Create Blackboard + Behavior Tree assets under folder.
+	const FString BBPath = JoinAssetPath(Folder, TEXT("BB_Wander"));
+	const FString BTPath = JoinAssetPath(Folder, TEXT("BT_Wander"));
+	const FString AIControllerBPPath = JoinAssetPath(Folder, TEXT("BP_WanderAIController"));
+
+	USkeleton* Skel = nullptr;
+	if (USkeletalMeshComponent* SkelComp = SelectedActor->FindComponentByClass<USkeletalMeshComponent>())
+	{
+		if (USkeletalMesh* Mesh = SkelComp->GetSkeletalMeshAsset())
+		{
+			Skel = Mesh->GetSkeleton();
+		}
+	}
+
+	// Create BB
+	FString Err;
+	UBlackboardData* BB = LoadObject<UBlackboardData>(nullptr, *BBPath);
+	if (!BB)
+	{
+		UBlackboardDataFactory* BBFactory = NewObject<UBlackboardDataFactory>();
+		UObject* BBAsset = CreateAssetWithFactory(BBPath, UBlackboardData::StaticClass(), BBFactory, Err);
+		BB = Cast<UBlackboardData>(BBAsset);
+	}
+	if (!BB)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to create Blackboard"));
+		Out->SetStringField(TEXT("details"), Err);
+		OnComplete(JsonResponse(Out, 500));
+		return true;
+	}
+
+	// Ensure a Vector key exists: WanderLocation
+	{
+		const FName KeyName(TEXT("WanderLocation"));
+		bool bHasKey = false;
+		for (const FBlackboardEntry& E : BB->Keys)
+		{
+			if (E.EntryName == KeyName)
+			{
+				bHasKey = true;
+				break;
+			}
+		}
+		if (!bHasKey)
+		{
+			BB->Modify();
+			FBlackboardEntry NewEntry;
+			NewEntry.EntryName = KeyName;
+			NewEntry.KeyType = NewObject<UBlackboardKeyType_Vector>(BB);
+			BB->Keys.Add(MoveTemp(NewEntry));
+			BB->MarkPackageDirty();
+		}
+	}
+
+	// Create BT
+	UBehaviorTree* BT = LoadObject<UBehaviorTree>(nullptr, *BTPath);
+	if (!BT)
+	{
+		UBehaviorTreeFactory* BTFactory = NewObject<UBehaviorTreeFactory>();
+		UObject* BTAsset = CreateAssetWithFactory(BTPath, UBehaviorTree::StaticClass(), BTFactory, Err);
+		BT = Cast<UBehaviorTree>(BTAsset);
+	}
+	if (!BT)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to create BehaviorTree"));
+		Out->SetStringField(TEXT("details"), Err);
+		OnComplete(JsonResponse(Out, 500));
+		return true;
+	}
+
+	// 3) Build a simple runtime tree: Sequence( MoveTo(WanderLocation), Wait(random) ) and set Blackboard asset.
+	{
+		BT->Modify();
+		BT->BlackboardAsset = BB;
+
+		UBTComposite_Sequence* RootSeq = NewObject<UBTComposite_Sequence>(BT, TEXT("RootSequence"));
+		BT->RootNode = RootSeq;
+
+		// Task: Find random reachable point and write WanderLocation
+		UUEAgentBTTask_FindRandomReachablePoint* FindRand = NewObject<UUEAgentBTTask_FindRandomReachablePoint>(BT, TEXT("FindRandomReachablePoint"));
+		FindRand->DestinationKey.SelectedKeyName = FName(TEXT("WanderLocation"));
+		FindRand->Radius = (float)Radius;
+
+		// Task: MoveTo WanderLocation
+		UBTTask_MoveTo* MoveTo = NewObject<UBTTask_MoveTo>(BT, TEXT("MoveToWanderLocation"));
+		SetBTTaskBlackboardKey(MoveTo, FName(TEXT("WanderLocation")));
+		MoveTo->AcceptableRadius = FValueOrBBKey_Float(50.0f);
+
+		// Task: Wait
+		UBTTask_Wait* Wait = NewObject<UBTTask_Wait>(BT, TEXT("Wait"));
+		Wait->WaitTime = (float)WaitMin;
+		Wait->RandomDeviation = (float)FMath::Max(0.0, WaitMax - WaitMin);
+
+		RootSeq->Children.Reset();
+		{
+			FBTCompositeChild Child;
+			Child.ChildTask = FindRand;
+			RootSeq->Children.Add(MoveTemp(Child));
+		}
+		{
+			FBTCompositeChild Child;
+			Child.ChildTask = MoveTo;
+			RootSeq->Children.Add(MoveTemp(Child));
+		}
+		{
+			FBTCompositeChild Child;
+			Child.ChildTask = Wait;
+			RootSeq->Children.Add(MoveTemp(Child));
+		}
+
+		BT->MarkPackageDirty();
+	}
+
+	// 4) Create AIController Blueprint (parent: AIController) and wire BeginPlay -> RunBehaviorTree(BT).
+	UBlueprint* AIBP = LoadObject<UBlueprint>(nullptr, *AIControllerBPPath);
+	if (!AIBP)
+	{
+		TSharedPtr<FJsonObject> CreateInput = MakeShared<FJsonObject>();
+		CreateInput->SetStringField(TEXT("assetPath"), AIControllerBPPath);
+		CreateInput->SetStringField(TEXT("parentClassPath"), TEXT("/Script/AIModule.AIController"));
+
+		TUniquePtr<FHttpServerResponse> Captured;
+		FHttpResultCallback Cb = [&Captured](TUniquePtr<FHttpServerResponse>&& Resp) { Captured = MoveTemp(Resp); };
+		HandleTool_AssetCreateBlueprint(CreateInput, Cb);
+
+		AIBP = LoadObject<UBlueprint>(nullptr, *AIControllerBPPath);
+	}
+	if (!AIBP)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("Failed to create AIController Blueprint"));
+		OnComplete(JsonResponse(Out, 500));
+		return true;
+	}
+
+	// Find EventGraph
+	UEdGraph* EventGraph = nullptr;
+	if (AIBP->UbergraphPages.Num() > 0)
+	{
+		EventGraph = AIBP->UbergraphPages[0];
+	}
+	if (!EventGraph)
+	{
+		Out->SetBoolField(TEXT("ok"), false);
+		Out->SetStringField(TEXT("error"), TEXT("AIController Blueprint has no EventGraph"));
+		OnComplete(JsonResponse(Out, 500));
+		return true;
+	}
+
+	// Add nodes and connect
+	FString BeginGuid;
+	FString RunGuid;
+	{
+		// BeginPlay
+		{
+			TSharedPtr<FJsonObject> In = MakeShared<FJsonObject>();
+			In->SetStringField(TEXT("blueprintPath"), AIControllerBPPath);
+			In->SetStringField(TEXT("graphName"), EventGraph->GetName());
+			In->SetNumberField(TEXT("x"), 0);
+			In->SetNumberField(TEXT("y"), 0);
+
+			TUniquePtr<FHttpServerResponse> Captured;
+			FHttpResultCallback Cb = [&Captured](TUniquePtr<FHttpServerResponse>&& Resp) { Captured = MoveTemp(Resp); };
+			HandleTool_BlueprintK2AddBeginPlay(In, Cb);
+			const FString RespBody = HttpResponseBodyToString(*Captured);
+			TSharedPtr<FJsonObject> Obj;
+			if (TryParseJsonObject(RespBody, Obj) && Obj->GetBoolField(TEXT("ok")))
+			{
+				BeginGuid = Obj->GetStringField(TEXT("result"));
+			}
+		}
+
+		// RunBehaviorTree call
+		{
+			TSharedPtr<FJsonObject> In = MakeShared<FJsonObject>();
+			In->SetStringField(TEXT("blueprintPath"), AIControllerBPPath);
+			In->SetStringField(TEXT("graphName"), EventGraph->GetName());
+			In->SetStringField(TEXT("functionPath"), TEXT("/Script/AIModule.AIController:RunBehaviorTree"));
+			In->SetNumberField(TEXT("x"), 260);
+			In->SetNumberField(TEXT("y"), 0);
+
+			TUniquePtr<FHttpServerResponse> Captured;
+			FHttpResultCallback Cb = [&Captured](TUniquePtr<FHttpServerResponse>&& Resp) { Captured = MoveTemp(Resp); };
+			HandleTool_BlueprintK2AddCallFunction(In, Cb);
+			const FString RespBody = HttpResponseBodyToString(*Captured);
+			TSharedPtr<FJsonObject> Obj;
+			if (TryParseJsonObject(RespBody, Obj) && Obj->GetBoolField(TEXT("ok")))
+			{
+				RunGuid = Obj->GetStringField(TEXT("result"));
+			}
+		}
+
+		// Connect exec: BeginPlay -> RunBehaviorTree
+		if (!BeginGuid.IsEmpty() && !RunGuid.IsEmpty())
+		{
+			TSharedPtr<FJsonObject> In = MakeShared<FJsonObject>();
+			In->SetStringField(TEXT("blueprintPath"), AIControllerBPPath);
+			In->SetStringField(TEXT("graphName"), EventGraph->GetName());
+			In->SetStringField(TEXT("fromNodeGuid"), BeginGuid);
+			In->SetStringField(TEXT("fromPin"), TEXT("then"));
+			In->SetStringField(TEXT("toNodeGuid"), RunGuid);
+			In->SetStringField(TEXT("toPin"), TEXT("execute"));
+			In->SetBoolField(TEXT("compile"), false);
+
+			TUniquePtr<FHttpServerResponse> Captured;
+			FHttpResultCallback Cb = [&Captured](TUniquePtr<FHttpServerResponse>&& Resp) { Captured = MoveTemp(Resp); };
+			HandleTool_BlueprintK2ConnectPins(In, Cb);
+		}
+
+		// Set BehaviorTree pin default object
+		if (!RunGuid.IsEmpty())
+		{
+			TSharedPtr<FJsonObject> In = MakeShared<FJsonObject>();
+			In->SetStringField(TEXT("blueprintPath"), AIControllerBPPath);
+			In->SetStringField(TEXT("graphName"), EventGraph->GetName());
+			In->SetStringField(TEXT("nodeGuid"), RunGuid);
+			In->SetStringField(TEXT("pin"), TEXT("BehaviorTree"));
+			In->SetStringField(TEXT("value"), BTPath);
+			In->SetBoolField(TEXT("asObjectPath"), true);
+			In->SetBoolField(TEXT("compile"), true);
+
+			TUniquePtr<FHttpServerResponse> Captured;
+			FHttpResultCallback Cb = [&Captured](TUniquePtr<FHttpServerResponse>&& Resp) { Captured = MoveTemp(Resp); };
+			HandleTool_BlueprintK2SetPinDefault(In, Cb);
+		}
+	}
+
+	// 5) Apply to selected pawn instance
+	UClass* AIControllerClass = nullptr;
+	if (AIBP->GeneratedClass)
+	{
+		AIControllerClass = AIBP->GeneratedClass;
+	}
+	else
+	{
+		FKismetEditorUtilities::CompileBlueprint(AIBP);
+		AIControllerClass = AIBP->GeneratedClass;
+	}
+
+	Pawn->Modify();
+	Pawn->AIControllerClass = AIControllerClass;
+	Pawn->AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned;
+
+	// 6) Validate navigation availability
+	bool bHasNav = false;
+	if (UWorld* World = Pawn->GetWorld())
+	{
+		if (UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World))
+		{
+			if (NavSys->GetDefaultNavDataInstance(FNavigationSystem::DontCreate) != nullptr)
+			{
+				bHasNav = true;
+			}
+		}
+	}
+
+	Out->SetBoolField(TEXT("ok"), true);
+	Out->SetStringField(TEXT("selectedActor"), Pawn->GetName());
+	Out->SetStringField(TEXT("folder"), Folder);
+	Out->SetStringField(TEXT("blackboard"), BBPath);
+	Out->SetStringField(TEXT("behaviorTree"), BTPath);
+	Out->SetStringField(TEXT("aiControllerBlueprint"), AIControllerBPPath);
+	Out->SetBoolField(TEXT("navmeshDetected"), bHasNav);
+	if (!bHasNav)
+	{
+		Out->SetStringField(TEXT("warning"), TEXT("No NavMesh detected. Add a NavMeshBoundsVolume and build navigation for wandering to work."));
+	}
+
 	OnComplete(JsonResponse(Out, 200));
 	return true;
 }
