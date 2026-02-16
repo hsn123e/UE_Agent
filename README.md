@@ -83,6 +83,13 @@
 
 الجسر مصمم للاستخدام المحلي فقط (`localhost`). لا تفتحه على الشبكة ولا تشارك مفاتيح API.
 
+### معلومات التواصل
+
+- الاسم: حسن الحو
+- الموقع: سوريا — دمشق
+- الشعار: X555
+- ديسكورد: `X555#5266`
+
 ---
 
 ## English
@@ -154,5 +161,12 @@ For deterministic Blueprint graph editing and AI assets:
 This is a C++ editor plugin. Unreal must compile it at least once to match your exact engine version (e.g. 5.7.2) and platform. Many Marketplace plugins either:
 - are Blueprint-only (no compilation), or
 - ship with prebuilt `Binaries` for the same engine version/platform.
+
+### Contact
+
+- Name: Hassan Al-Hou
+- Location: Damascus, Syria
+- Brand: X555
+- Discord: `X555#5266`
 
 
