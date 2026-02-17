@@ -197,6 +197,93 @@ static bool TryExtractFirstJsonObject(const FString& Text, FString& OutJson)
 	return false;
 }
 
+static bool TryRepairJsonObjectByBalancingBraces(const FString& Text, FString& OutJson)
+{
+	int32 Start = INDEX_NONE;
+	for (int32 i = 0; i < Text.Len(); i++)
+	{
+		if (Text[i] == TCHAR('{'))
+		{
+			Start = i;
+			break;
+		}
+	}
+	if (Start == INDEX_NONE)
+	{
+		return false;
+	}
+
+	int32 Depth = 0;
+	bool bInString = false;
+	bool bEscaped = false;
+	for (int32 i = Start; i < Text.Len(); i++)
+	{
+		const TCHAR C = Text[i];
+		if (bInString)
+		{
+			if (bEscaped)
+			{
+				bEscaped = false;
+				continue;
+			}
+			if (C == TCHAR('\\'))
+			{
+				bEscaped = true;
+				continue;
+			}
+			if (C == TCHAR('"'))
+			{
+				bInString = false;
+				continue;
+			}
+			continue;
+		}
+
+		if (C == TCHAR('"'))
+		{
+			bInString = true;
+			continue;
+		}
+
+		if (C == TCHAR('{'))
+		{
+			Depth++;
+		}
+		else if (C == TCHAR('}'))
+		{
+			Depth--;
+			if (Depth == 0)
+			{
+				OutJson = Text.Mid(Start, i - Start + 1);
+				return true;
+			}
+		}
+	}
+
+	// If we got here, the object likely got truncated. Try balancing.
+	if (Depth > 0)
+	{
+		FString Candidate = Text.Mid(Start).TrimStartAndEnd();
+		for (int32 i = 0; i < Depth; i++)
+		{
+			Candidate += TEXT("}");
+		}
+		OutJson = Candidate;
+		return true;
+	}
+
+	return false;
+}
+
+static bool TryExtractOrRepairFirstJsonObject(const FString& Text, FString& OutJson)
+{
+	if (TryExtractFirstJsonObject(Text, OutJson))
+	{
+		return true;
+	}
+	return TryRepairJsonObjectByBalancingBraces(Text, OutJson);
+}
+
 static FString GetAgentSystemPrompt()
 {
 	// Keep short-ish to avoid huge prompts; enough for reliable tool usage.
@@ -230,6 +317,7 @@ static FString GetAgentSystemPrompt()
 		"- If a tool call fails due to missing/invalid input, fix the inputs and retry automatically.\n"
 		"- Only ask a question if you are truly blocked and cannot safely proceed.\n"
 		"- Prefer tool calls over explanations. Save explanations for the very end.\n"
+		"- If you respond with type=tool_call, output STRICT valid JSON only (no extra text), and ensure braces are balanced.\n"
 		"- If you need a tool, respond with ONLY a single JSON object:\n"
 		"  {\"type\":\"tool_call\",\"toolName\":\"...\",\"input\":{...}}\n"
 		"- After a tool call, you will receive a user message containing JSON:\n"
@@ -2444,7 +2532,7 @@ public:
 		if (!TryParseJsonObject(JsonText, MsgObj))
 		{
 			FString Extracted;
-			if (TryExtractFirstJsonObject(Content, Extracted) && TryParseJsonObject(Extracted, MsgObj))
+			if (TryExtractOrRepairFirstJsonObject(Content, Extracted) && TryParseJsonObject(Extracted, MsgObj))
 			{
 				JsonText = Extracted;
 			}
@@ -2452,6 +2540,31 @@ public:
 
 		if (!MsgObj.IsValid())
 		{
+			// If the model attempted the JSON tool protocol but produced invalid/truncated JSON, auto-correct and retry.
+			const FString Lower = Content.ToLower();
+			const bool bLooksLikeToolProtocol = Lower.Contains(TEXT("\"type\"")) && (Lower.Contains(TEXT("tool_call")) || Lower.Contains(TEXT("tool_result")) || Lower.Contains(TEXT("final")));
+			const bool bStartsLikeJson = Content.TrimStart().StartsWith(TEXT("{"));
+			if (StepsRemaining > 0 && (bLooksLikeToolProtocol || bStartsLikeJson) && JsonProtocolRetries < 2)
+			{
+				JsonProtocolRetries++;
+				AppendTranscript(TEXT("[llm] invalid JSON protocol output; retrying with stricter instructions"));
+				Messages.Add({TEXT("user"),
+					TEXT("Your last response was NOT valid JSON.\n")
+					TEXT("Reply again with ONLY ONE JSON object and nothing else.\n")
+					TEXT("If you need a tool: {\"type\":\"tool_call\",\"toolName\":\"...\",\"input\":{...}}\n")
+					TEXT("If finished: {\"type\":\"final\",\"text\":\"...\"}\n")});
+				if (FConversation* C = GetActiveConversation())
+				{
+					C->Messages = Messages;
+					C->UpdatedAt = FDateTime::UtcNow();
+					RefreshConversationList();
+					SaveConversations();
+					SyncTranscriptFromConversation();
+				}
+				AgentStep();
+				return;
+			}
+
 			// Normal text response (no JSON tool protocol).
 			Messages.Add({TEXT("assistant"), Content});
 			if (FConversation* C = GetActiveConversation())
@@ -2480,6 +2593,7 @@ public:
 
 		if (Type == TEXT("final"))
 		{
+			JsonProtocolRetries = 0;
 			FString Text;
 			MsgObj->TryGetStringField(TEXT("text"), Text);
 			Messages.Add({TEXT("assistant"), Text});
@@ -2497,6 +2611,7 @@ public:
 
 		if (Type == TEXT("tool_call"))
 		{
+			JsonProtocolRetries = 0;
 			FString ToolName;
 			MsgObj->TryGetStringField(TEXT("toolName"), ToolName);
 			const TSharedPtr<FJsonObject>* InputPtr = nullptr;
@@ -2585,6 +2700,7 @@ private:
 
 		bBusy = true;
 		bDisableToolCalling = false;
+		JsonProtocolRetries = 0;
 		const int32 RequestedSteps = (MaxSteps <= 0) ? 5000 : MaxSteps;
 		StepsRemaining = FMath::Clamp(RequestedSteps, 1, 5000);
 
@@ -2669,6 +2785,7 @@ private:
 	int32 StepsRemaining = 0;
 	TArray<FAgentMessage> Messages;
 	bool bDisableToolCalling = false;
+	int32 JsonProtocolRetries = 0;
 
 	FHttpRequestPtr ActiveRequest;
 
