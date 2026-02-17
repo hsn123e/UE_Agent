@@ -803,7 +803,7 @@ public:
 			FProviderPreset P;
 			P.Label = TEXT("Ollama (Local)");
 			P.Provider = EUEAgentProvider::OllamaCloud;
-			P.BaseUrl = TEXT("http://localhost:11434/api");
+			P.BaseUrl = TEXT("http://127.0.0.1:11434/api");
 			P.bAllowEditBaseUrl = false;
 			ProviderPresets.Add(MoveTemp(P));
 		}
@@ -827,7 +827,7 @@ public:
 		AddOpenAICompat(TEXT("Fireworks"), TEXT("https://api.fireworks.ai/inference/v1"), {});
 		AddOpenAICompat(TEXT("DeepInfra"), TEXT("https://api.deepinfra.com/v1/openai"), {});
 		AddOpenAICompat(TEXT("LM Studio (Local)"), TEXT("http://localhost:1234/v1"), {});
-		AddOpenAICompat(TEXT("Ollama (Local OpenAI-compatible)"), TEXT("http://localhost:11434/v1"), {});
+		AddOpenAICompat(TEXT("Ollama (Local OpenAI-compatible)"), TEXT("http://127.0.0.1:11434/v1"), {});
 
 		// Custom
 		{
@@ -2534,6 +2534,25 @@ public:
 				}
 			}
 
+			// Common Windows/UE networking quirk: "localhost" may resolve to ::1 while Ollama listens on 127.0.0.1.
+			// If the request failed, retry once by replacing localhost with 127.0.0.1.
+			if (Request.IsValid() && Request->GetStatus() == EHttpRequestStatus::Failed && ConnectionRetryCount < 1)
+			{
+				if (UrlStr.Contains(TEXT("://localhost"), ESearchCase::IgnoreCase) || BaseUrl.Contains(TEXT("localhost"), ESearchCase::IgnoreCase))
+				{
+					ConnectionRetryCount++;
+					BaseUrl.ReplaceInline(TEXT("localhost"), TEXT("127.0.0.1"), ESearchCase::IgnoreCase);
+					if (BaseUrlBox.IsValid())
+					{
+						BaseUrlBox->SetText(FText::FromString(BaseUrl));
+					}
+					StepsRemaining = FMath::Clamp(StepsRemaining + 1, 0, 5000); // compensate a step for the retry
+					AppendTranscript(TEXT("[llm] request failed; retrying with 127.0.0.1 (localhost -> 127.0.0.1)"));
+					AgentStep();
+					return;
+				}
+			}
+
 			if (!UrlStr.IsEmpty())
 			{
 				AppendTranscript(FString::Printf(TEXT("[llm] request failed (status=%s)"), *StatusStr));
@@ -2876,6 +2895,7 @@ private:
 		bBusy = true;
 		bDisableToolCalling = false;
 		JsonProtocolRetries = 0;
+		ConnectionRetryCount = 0;
 		RequestStartSeconds = FPlatformTime::Seconds();
 		const int32 RequestedSteps = (MaxSteps <= 0) ? 5000 : MaxSteps;
 		StepsRemaining = FMath::Clamp(RequestedSteps, 1, 5000);
@@ -2967,6 +2987,7 @@ private:
 	TArray<FAgentMessage> Messages;
 	bool bDisableToolCalling = false;
 	int32 JsonProtocolRetries = 0;
+	int32 ConnectionRetryCount = 0;
 
 	FHttpRequestPtr ActiveRequest;
 
