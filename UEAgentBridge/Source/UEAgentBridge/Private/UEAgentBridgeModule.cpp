@@ -26,6 +26,7 @@
 #include "Styling/AppStyle.h"
 
 #include "InputCoreTypes.h"
+#include "HAL/PlatformTime.h"
 
 #include "HttpModule.h"
 #include "Interfaces/IHttpRequest.h"
@@ -348,6 +349,7 @@ public:
 		Model = Settings->Model;
 		MaxSteps = Settings->MaxSteps;
 		Temperature = Settings->Temperature;
+		RequestTimeoutSeconds = Settings->RequestTimeoutSeconds;
 
 		InitProviderPresets();
 
@@ -1228,6 +1230,14 @@ public:
 				.AutoWrapText(true)
 			]
 
+			+ SVerticalBox::Slot().AutoHeight().Padding(0, 2)
+			[
+				SNew(STextBlock)
+				.Font(FAppStyle::Get().GetFontStyle(TEXT("SmallFont")))
+				.ColorAndOpacity(FSlateColor(FLinearColor(0.75f, 0.75f, 0.75f, 1.0f)))
+				.Text(this, &SUEAgentBridgePanel::GetStatusText)
+			]
+
 			+ SVerticalBox::Slot().AutoHeight()
 			[
 				SNew(SBox)
@@ -1435,6 +1445,16 @@ public:
 							.Text(FText::AsNumber(MaxSteps))
 						]
 
+						+ SVerticalBox::Slot().AutoHeight().Padding(0, 10)
+						[
+							SNew(STextBlock).Text(FText::FromString(TEXT("Request timeout seconds (0 = no timeout)")))
+						]
+						+ SVerticalBox::Slot().AutoHeight()
+						[
+							SAssignNew(RequestTimeoutBox, SEditableTextBox)
+							.Text(FText::AsNumber(RequestTimeoutSeconds))
+						]
+
 						+ SVerticalBox::Slot().AutoHeight().Padding(0, 12)
 						[
 							SNew(SSeparator)
@@ -1491,6 +1511,26 @@ public:
 	bool CanSend() const
 	{
 		return !bBusy;
+	}
+
+	FText GetStatusText() const
+	{
+		if (!bBusy)
+		{
+			return FText::GetEmpty();
+		}
+
+		const double Now = FPlatformTime::Seconds();
+		const double Elapsed = FMath::Max(0.0, Now - RequestStartSeconds);
+		const int32 Total = (int32)Elapsed;
+		const int32 Min = Total / 60;
+		const int32 Sec = Total % 60;
+
+		const FString TimeoutStr = (RequestTimeoutSeconds <= 0)
+			? TEXT("timeout: none")
+			: FString::Printf(TEXT("timeout: %ds"), RequestTimeoutSeconds);
+
+		return FText::FromString(FString::Printf(TEXT("Running… %02d:%02d | model: %s | %s"), Min, Sec, *Model, *TimeoutStr));
 	}
 
 	bool CanStop() const
@@ -1631,12 +1671,20 @@ public:
 			MaxSteps = FMath::Clamp(MaxSteps, 0, 5000);
 			MaxStepsBox->SetText(FText::AsNumber(MaxSteps));
 		}
+		if (RequestTimeoutBox.IsValid())
+		{
+			const FString S = RequestTimeoutBox->GetText().ToString().TrimStartAndEnd();
+			RequestTimeoutSeconds = FCString::Atoi(*S);
+			RequestTimeoutSeconds = FMath::Clamp(RequestTimeoutSeconds, 0, 86400);
+			RequestTimeoutBox->SetText(FText::AsNumber(RequestTimeoutSeconds));
+		}
 		Settings->Provider = Provider;
 		Settings->BaseUrl = BaseUrl;
 		Settings->ApiKey = ApiKey;
 		Settings->Model = Model;
 		Settings->MaxSteps = MaxSteps;
 		Settings->Temperature = Temperature;
+		Settings->RequestTimeoutSeconds = RequestTimeoutSeconds;
 		Settings->SaveConfig();
 		AppendTranscript(TEXT("[settings] saved"));
 		return FReply::Handled();
@@ -2332,6 +2380,7 @@ public:
 		}
 
 		TSharedRef<IHttpRequest> Req = FHttpModule::Get().CreateRequest();
+		Req->SetTimeout(RequestTimeoutSeconds <= 0 ? 0.0f : (float)RequestTimeoutSeconds);
 		Req->SetVerb(TEXT("POST"));
 		Req->SetURL(Url);
 		Req->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
@@ -2705,6 +2754,7 @@ private:
 		bBusy = true;
 		bDisableToolCalling = false;
 		JsonProtocolRetries = 0;
+		RequestStartSeconds = FPlatformTime::Seconds();
 		const int32 RequestedSteps = (MaxSteps <= 0) ? 5000 : MaxSteps;
 		StepsRemaining = FMath::Clamp(RequestedSteps, 1, 5000);
 
@@ -2765,6 +2815,7 @@ private:
 	TSharedPtr<SEditableTextBox> ApiKeyBox;
 	TSharedPtr<SEditableTextBox> ModelBox;
 	TSharedPtr<SEditableTextBox> MaxStepsBox;
+	TSharedPtr<SEditableTextBox> RequestTimeoutBox;
 	TSharedPtr<SWidgetSwitcher> RightSwitcher;
 
 	TArray<FProviderPreset> ProviderPresets;
@@ -2784,6 +2835,8 @@ private:
 	FString Model;
 	int32 MaxSteps = 8;
 	float Temperature = 0.0f;
+	int32 RequestTimeoutSeconds = 0;
+	double RequestStartSeconds = 0.0;
 
 	bool bBusy = false;
 	int32 StepsRemaining = 0;

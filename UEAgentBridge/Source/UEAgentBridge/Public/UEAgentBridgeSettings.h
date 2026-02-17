@@ -37,4 +37,8 @@ public:
 
 	UPROPERTY(config, EditAnywhere, Category = "LLM", meta = (ClampMin = "0.0", ClampMax = "2.0"))
 	float Temperature = 0.0f;
+
+	// HTTP request timeout in seconds. Set to 0 to disable timeout (useful for slow local models).
+	UPROPERTY(config, EditAnywhere, Category = "LLM", meta = (ClampMin = "0", ClampMax = "86400"))
+	int32 RequestTimeoutSeconds = 0;
 };
