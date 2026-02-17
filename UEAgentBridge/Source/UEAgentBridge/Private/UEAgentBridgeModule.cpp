@@ -1807,6 +1807,10 @@ public:
 			WaitMaxProp->SetStringField(TEXT("type"), TEXT("number"));
 			Props->SetObjectField(TEXT("waitMax"), WaitMaxProp);
 
+			auto ApplyDefaultsProp = MakeShared<FJsonObject>();
+			ApplyDefaultsProp->SetStringField(TEXT("type"), TEXT("boolean"));
+			Props->SetObjectField(TEXT("applyToBlueprintDefaults"), ApplyDefaultsProp);
+
 			Schema->SetObjectField(TEXT("properties"), Props);
 			OutTools.Add(MakeTool(TEXT("ai.setup_wander_for_selected_actor"), TEXT("Create a simple wander AI setup (BB/BT/AIController) under /Game/... and apply it to the selected Character immediately."), Schema));
 		}
@@ -3968,6 +3972,10 @@ bool FUEAgentBridgeModule::HandleTools(const FHttpServerRequest& Request, const 
 		WaitMaxProp->SetStringField(TEXT("type"), TEXT("number"));
 		Props->SetObjectField(TEXT("waitMax"), WaitMaxProp);
 
+		auto ApplyDefaultsProp = MakeShared<FJsonObject>();
+		ApplyDefaultsProp->SetStringField(TEXT("type"), TEXT("boolean"));
+		Props->SetObjectField(TEXT("applyToBlueprintDefaults"), ApplyDefaultsProp);
+
 		Schema->SetObjectField(TEXT("properties"), Props);
 		Tool->SetObjectField(TEXT("inputSchema"), Schema);
 		Tools.Add(MakeShared<FJsonValueObject>(Tool));
@@ -5039,6 +5047,24 @@ bool FUEAgentBridgeModule::HandleTool_EditorGetSelectedActorDetails(const FHttpR
 	auto Out = MakeShared<FJsonObject>();
 	Out->SetBoolField(TEXT("ok"), true);
 
+	auto AutoPossessPlayerToString = [](EAutoReceiveInput::Type V) -> FString
+	{
+		switch (V)
+		{
+		case EAutoReceiveInput::Disabled: return TEXT("Disabled");
+		case EAutoReceiveInput::Player0: return TEXT("Player0");
+		case EAutoReceiveInput::Player1: return TEXT("Player1");
+		case EAutoReceiveInput::Player2: return TEXT("Player2");
+		case EAutoReceiveInput::Player3: return TEXT("Player3");
+		case EAutoReceiveInput::Player4: return TEXT("Player4");
+		case EAutoReceiveInput::Player5: return TEXT("Player5");
+		case EAutoReceiveInput::Player6: return TEXT("Player6");
+		case EAutoReceiveInput::Player7: return TEXT("Player7");
+		default: break;
+		}
+		return FString::Printf(TEXT("%d"), (int32)V);
+	};
+
 	TArray<TSharedPtr<FJsonValue>> Items;
 	if (GEditor)
 	{
@@ -5055,6 +5081,29 @@ bool FUEAgentBridgeModule::HandleTool_EditorGetSelectedActorDetails(const FHttpR
 			Obj->SetStringField(TEXT("name"), Actor->GetName());
 			Obj->SetStringField(TEXT("path"), Actor->GetPathName());
 			Obj->SetStringField(TEXT("classPath"), Actor->GetClass() ? Actor->GetClass()->GetPathName() : TEXT(""));
+
+			// If this is a Blueprint-generated class, include the Blueprint asset path.
+			if (UBlueprint* BP = Cast<UBlueprint>(Actor->GetClass() ? Actor->GetClass()->ClassGeneratedBy : nullptr))
+			{
+				Obj->SetStringField(TEXT("blueprintAssetPath"), BP->GetPathName());
+			}
+
+			// Pawn/AI info (helps verify that tools actually applied changes).
+			if (APawn* Pawn = Cast<APawn>(Actor))
+			{
+				Obj->SetBoolField(TEXT("isPawn"), true);
+				Obj->SetStringField(TEXT("aiControllerClassPath"), Pawn->AIControllerClass ? Pawn->AIControllerClass->GetPathName() : TEXT(""));
+				Obj->SetStringField(TEXT("autoPossessAI"), StaticEnum<EAutoPossessAI>()->GetNameStringByValue((int64)Pawn->AutoPossessAI));
+				Obj->SetStringField(TEXT("autoPossessPlayer"), AutoPossessPlayerToString(Pawn->AutoPossessPlayer));
+				if (AController* C = Pawn->GetController())
+				{
+					Obj->SetStringField(TEXT("controllerClassPath"), C->GetClass() ? C->GetClass()->GetPathName() : TEXT(""));
+				}
+			}
+			else
+			{
+				Obj->SetBoolField(TEXT("isPawn"), false);
+			}
 
 			USkeletalMeshComponent* Skel = Actor->FindComponentByClass<USkeletalMeshComponent>();
 			Obj->SetBoolField(TEXT("hasSkeletalMesh"), Skel != nullptr);
@@ -5231,10 +5280,15 @@ bool FUEAgentBridgeModule::HandleTool_LevelSpawnActor(const TSharedPtr<FJsonObje
 	FString ClassPath;
 	if (!Input->TryGetStringField(TEXT("classPath"), ClassPath) || ClassPath.IsEmpty())
 	{
-		Out->SetBoolField(TEXT("ok"), false);
-		Out->SetStringField(TEXT("error"), TEXT("Missing classPath"));
-		OnComplete(JsonResponse(Out, 400));
-		return true;
+		// Back-compat alias: some models use actorClass instead of classPath.
+		Input->TryGetStringField(TEXT("actorClass"), ClassPath);
+		if (ClassPath.IsEmpty())
+		{
+			Out->SetBoolField(TEXT("ok"), false);
+			Out->SetStringField(TEXT("error"), TEXT("Missing classPath"));
+			OnComplete(JsonResponse(Out, 400));
+			return true;
+		}
 	}
 
 	UWorld* World = (GEditor ? GEditor->GetEditorWorldContext().World() : nullptr);
@@ -5392,10 +5446,26 @@ bool FUEAgentBridgeModule::HandleTool_AssetCreateBlueprint(const TSharedPtr<FJso
 		return true;
 	}
 
+	// Parent class inference:
+	// - default to Actor, but infer common cases to reduce "empty Actor BP" mistakes from models.
 	FString ParentClassPath(TEXT("/Script/Engine.Actor"));
-	Input->TryGetStringField(TEXT("parentClassPath"), ParentClassPath);
+	const bool bHasExplicitParent = Input->HasField(TEXT("parentClassPath")) && Input->TryGetStringField(TEXT("parentClassPath"), ParentClassPath) && !ParentClassPath.IsEmpty();
 
 	UClass* ParentClass = StaticLoadClass(UObject::StaticClass(), nullptr, *ParentClassPath);
+	if (!bHasExplicitParent)
+	{
+		// Infer by name/path.
+		FString NameLower = AssetPath.ToLower();
+		if (NameLower.Contains(TEXT("aicontroller")) || NameLower.Contains(TEXT("ai_controller")))
+		{
+			ParentClassPath = TEXT("/Script/AIModule.AIController");
+		}
+		else if (NameLower.Contains(TEXT("character")) || NameLower.Contains(TEXT("pawn")) || NameLower.Contains(TEXT("npc")))
+		{
+			ParentClassPath = TEXT("/Script/Engine.Character");
+		}
+		ParentClass = StaticLoadClass(UObject::StaticClass(), nullptr, *ParentClassPath);
+	}
 	if (!ParentClass)
 	{
 		Out->SetBoolField(TEXT("ok"), false);
@@ -7362,6 +7432,7 @@ bool FUEAgentBridgeModule::HandleTool_AISetupWanderForSelectedActor(const TShare
 	double Radius = 1200.0;
 	double WaitMin = 1.0;
 	double WaitMax = 3.0;
+	bool bApplyToBlueprintDefaults = true;
 
 	if (Input.IsValid())
 	{
@@ -7369,6 +7440,7 @@ bool FUEAgentBridgeModule::HandleTool_AISetupWanderForSelectedActor(const TShare
 		Input->TryGetNumberField(TEXT("radius"), Radius);
 		Input->TryGetNumberField(TEXT("waitMin"), WaitMin);
 		Input->TryGetNumberField(TEXT("waitMax"), WaitMax);
+		Input->TryGetBoolField(TEXT("applyToBlueprintDefaults"), bApplyToBlueprintDefaults);
 	}
 
 	Folder = NormalizeGameFolder(Folder);
@@ -7653,6 +7725,34 @@ bool FUEAgentBridgeModule::HandleTool_AISetupWanderForSelectedActor(const TShare
 	Pawn->Modify();
 	Pawn->AIControllerClass = AIControllerClass;
 	Pawn->AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned;
+	Pawn->AutoPossessPlayer = EAutoReceiveInput::Disabled;
+
+	// Also apply to the selected actor's Blueprint defaults when possible (prevents "it did nothing" confusion).
+	if (bApplyToBlueprintDefaults)
+	{
+		if (UBlueprint* PawnBP = Cast<UBlueprint>(Pawn->GetClass() ? Pawn->GetClass()->ClassGeneratedBy : nullptr))
+		{
+			PawnBP->Modify();
+			if (!PawnBP->GeneratedClass)
+			{
+				FKismetEditorUtilities::CompileBlueprint(PawnBP);
+			}
+			if (UClass* Cls = PawnBP->GeneratedClass)
+			{
+				if (APawn* CDO = Cast<APawn>(Cls->GetDefaultObject()))
+				{
+					CDO->Modify();
+					CDO->AIControllerClass = AIControllerClass;
+					CDO->AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned;
+					CDO->AutoPossessPlayer = EAutoReceiveInput::Disabled;
+					FBlueprintEditorUtils::MarkBlueprintAsModified(PawnBP);
+					FKismetEditorUtilities::CompileBlueprint(PawnBP);
+
+					Out->SetStringField(TEXT("appliedToBlueprintDefaults"), PawnBP->GetPathName());
+				}
+			}
+		}
+	}
 
 	// 6) Validate navigation availability
 	bool bHasNav = false;
@@ -8331,9 +8431,18 @@ bool FUEAgentBridgeModule::HandleTool_CharacterSetupWanderAndLocomotionForSelect
 		FHttpResultCallback Cb = [&Captured](TUniquePtr<FHttpServerResponse>&& Resp) { Captured = MoveTemp(Resp); };
 		HandleTool_AISetupWanderForSelectedActor(AIIn, Cb);
 
-		const FString Body = Captured ? HttpResponseBodyToString(*Captured) : TEXT("");
+		FString Body = Captured ? HttpResponseBodyToString(*Captured) : TEXT("");
+		{
+			FString Extracted;
+			if (TryExtractOrRepairFirstJsonObject(Body, Extracted))
+			{
+				Body = Extracted;
+			}
+		}
 		TryParseJsonObject(Body, AIResultObj);
-		if (!AIResultObj.IsValid() || !AIResultObj->GetBoolField(TEXT("ok")))
+		// Treat "ok":true as success even if navmesh is missing (we return a warning).
+		const bool bOk = AIResultObj.IsValid() && AIResultObj->HasField(TEXT("ok")) && AIResultObj->GetBoolField(TEXT("ok"));
+		if (!bOk)
 		{
 			Out->SetBoolField(TEXT("ok"), false);
 			Out->SetStringField(TEXT("error"), TEXT("Wander AI setup failed"));
@@ -8341,6 +8450,18 @@ bool FUEAgentBridgeModule::HandleTool_CharacterSetupWanderAndLocomotionForSelect
 			Out->SetStringField(TEXT("aiBody"), Body.Left(8000));
 			OnComplete(JsonResponse(Out, 500));
 			return true;
+		}
+
+		// Surface navmesh warning at the top-level as well.
+		bool bNav = false;
+		if (AIResultObj->TryGetBoolField(TEXT("navmeshDetected"), bNav) && !bNav)
+		{
+			FString Warn;
+			AIResultObj->TryGetStringField(TEXT("warning"), Warn);
+			if (!Warn.IsEmpty())
+			{
+				Out->SetStringField(TEXT("warning"), Warn);
+			}
 		}
 	}
 
