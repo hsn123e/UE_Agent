@@ -2278,6 +2278,8 @@ public:
 		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 		Root->SetStringField(TEXT("model"), Model);
 		Root->SetNumberField(TEXT("temperature"), Temperature);
+		// We don't implement SSE streaming in the editor panel; force non-streaming responses.
+		Root->SetBoolField(TEXT("stream"), false);
 
 		TArray<TSharedPtr<FJsonValue>> MsgArr;
 		for (const FAgentMessage& M : Messages)
@@ -2493,13 +2495,13 @@ public:
 		Req->SetContentAsString(Body);
 
 		const TWeakPtr<SUEAgentBridgePanel> SelfWeak = StaticCastSharedRef<SUEAgentBridgePanel>(AsShared());
-		Req->OnProcessRequestComplete().BindLambda([SelfWeak](FHttpRequestPtr, FHttpResponsePtr Resp, bool bOk)
+		Req->OnProcessRequestComplete().BindLambda([SelfWeak](FHttpRequestPtr Request, FHttpResponsePtr Resp, bool bOk)
 		{
 			if (!SelfWeak.IsValid())
 			{
 				return;
 			}
-			SelfWeak.Pin()->OnLLMResponse(Resp, bOk);
+			SelfWeak.Pin()->OnLLMResponse(Request, Resp, bOk);
 		});
 
 		ActiveRequest = Req;
@@ -2512,12 +2514,35 @@ public:
 		}
 	}
 
-	void OnLLMResponse(FHttpResponsePtr Resp, bool bOk)
+	void OnLLMResponse(FHttpRequestPtr Request, FHttpResponsePtr Resp, bool bOk)
 	{
 		ActiveRequest.Reset();
 		if (!bOk || !Resp.IsValid())
 		{
-			AppendTranscript(TEXT("[llm] request failed"));
+			FString StatusStr = TEXT("unknown");
+			FString UrlStr;
+			if (Request.IsValid())
+			{
+				UrlStr = Request->GetURL();
+				switch (Request->GetStatus())
+				{
+				case EHttpRequestStatus::NotStarted: StatusStr = TEXT("NotStarted"); break;
+				case EHttpRequestStatus::Processing: StatusStr = TEXT("Processing"); break;
+				case EHttpRequestStatus::Failed: StatusStr = TEXT("Failed"); break;
+				case EHttpRequestStatus::Succeeded: StatusStr = TEXT("Succeeded"); break;
+				default: break;
+				}
+			}
+
+			if (!UrlStr.IsEmpty())
+			{
+				AppendTranscript(FString::Printf(TEXT("[llm] request failed (status=%s)"), *StatusStr));
+				AppendTranscript(FString::Printf(TEXT("[llm] url: %s"), *UrlStr));
+			}
+			else
+			{
+				AppendTranscript(TEXT("[llm] request failed"));
+			}
 			bBusy = false;
 			return;
 		}
