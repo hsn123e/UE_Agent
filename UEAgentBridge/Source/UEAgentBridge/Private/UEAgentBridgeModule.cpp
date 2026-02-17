@@ -18,12 +18,14 @@
 #include "Widgets/Input/SMultiLineEditableTextBox.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Text/STextBlock.h"
+#include "Widgets/Text/SRichTextBlock.h"
 #include "Widgets/Layout/SSeparator.h"
 #include "Widgets/Input/SComboBox.h"
 #include "Widgets/Views/SListView.h"
 #include "Widgets/Views/STableRow.h"
 
 #include "Styling/AppStyle.h"
+#include "Styling/SlateStyle.h"
 
 #include "InputCoreTypes.h"
 #include "HAL/PlatformTime.h"
@@ -352,6 +354,7 @@ public:
 		RequestTimeoutSeconds = Settings->RequestTimeoutSeconds;
 
 		InitProviderPresets();
+		InitTranscriptStyle();
 
 		LoadConversations();
 		if (Conversations.Num() == 0)
@@ -1225,9 +1228,14 @@ public:
 
 			+ SVerticalBox::Slot().FillHeight(1.0f).Padding(0, 8)
 			[
-				SAssignNew(TranscriptBox, SMultiLineEditableTextBox)
-				.IsReadOnly(true)
-				.AutoWrapText(true)
+				SAssignNew(TranscriptScroll, SScrollBox)
+				+ SScrollBox::Slot()
+				[
+					SAssignNew(TranscriptRich, SRichTextBlock)
+					.DecoratorStyleSet(TranscriptStyle.Get())
+					.AutoWrapText(true)
+					.Text(FText::GetEmpty())
+				]
 			]
 
 			+ SVerticalBox::Slot().AutoHeight().Padding(0, 2)
@@ -1492,25 +1500,117 @@ public:
 	void SetTranscriptText(FString NewText, bool bScrollToEnd)
 	{
 		Transcript = MoveTemp(NewText);
-		if (TranscriptBox.IsValid())
-		{
-			TranscriptBox->SetText(FText::FromString(Transcript));
-			if (bScrollToEnd)
-			{
-				TranscriptBox->ScrollTo(ETextLocation::EndOfDocument);
-			}
-		}
+		UpdateTranscriptRichText(bScrollToEnd);
 	}
 
 	void AppendTranscript(const FString& Line)
 	{
-		Transcript += Line + TEXT("\n");
-		SetTranscriptText(Transcript, /*bScrollToEnd*/ true);
+		Transcript += Line;
+		if (!Line.EndsWith(TEXT("\n")))
+		{
+			Transcript += TEXT("\n");
+		}
+		UpdateTranscriptRichText(/*bScrollToEnd*/ true);
 	}
 
 	bool CanSend() const
 	{
 		return !bBusy;
+	}
+
+	void InitTranscriptStyle()
+	{
+		if (TranscriptStyle.IsValid())
+		{
+			return;
+		}
+
+		TranscriptStyle = MakeShared<FSlateStyleSet>(TEXT("UEAgentBridgeTranscript"));
+		const FTextBlockStyle Base = FAppStyle::Get().GetWidgetStyle<FTextBlockStyle>(TEXT("NormalText"));
+
+		auto MakeMono = [](const FTextBlockStyle& In, const FLinearColor& Color) -> FTextBlockStyle
+		{
+			FTextBlockStyle S = In;
+			S.SetFont(FCoreStyle::GetDefaultFontStyle(TEXT("Mono"), 9));
+			S.SetColorAndOpacity(FSlateColor(Color));
+			return S;
+		};
+
+		// Tag names map directly to these keys.
+		TranscriptStyle->Set(TEXT("default"), Base);
+		TranscriptStyle->Set(TEXT("user"), MakeMono(Base, FLinearColor(0.85f, 0.85f, 0.85f, 1.0f)));
+		TranscriptStyle->Set(TEXT("assistant"), MakeMono(Base, FLinearColor(0.90f, 0.95f, 1.0f, 1.0f)));
+		TranscriptStyle->Set(TEXT("tool"), MakeMono(Base, FLinearColor(0.85f, 1.0f, 0.85f, 1.0f)));
+		TranscriptStyle->Set(TEXT("error"), MakeMono(Base, FLinearColor(1.0f, 0.75f, 0.75f, 1.0f)));
+		TranscriptStyle->Set(TEXT("code"), MakeMono(Base, FLinearColor(0.95f, 0.90f, 0.75f, 1.0f)));
+	}
+
+	static FString EscapeRichText(const FString& In)
+	{
+		FString Out = In;
+		Out.ReplaceInline(TEXT("&"), TEXT("&amp;"));
+		Out.ReplaceInline(TEXT("<"), TEXT("&lt;"));
+		Out.ReplaceInline(TEXT(">"), TEXT("&gt;"));
+		return Out;
+	}
+
+	static FString StyleTagForLine(const FString& Line)
+	{
+		const FString L = Line.TrimStart();
+		if (L.StartsWith(TEXT("{")) || L.StartsWith(TEXT("[")))
+		{
+			return TEXT("code");
+		}
+		if (L.StartsWith(TEXT("[tool]")) || L.StartsWith(TEXT("[tool_result]")) || L.StartsWith(TEXT("[selection]")))
+		{
+			return TEXT("tool");
+		}
+		if (L.StartsWith(TEXT("[llm]")) || L.StartsWith(TEXT("[agent]")) || L.StartsWith(TEXT("[chat]")) || L.StartsWith(TEXT("[models]")) || L.StartsWith(TEXT("[settings]")))
+		{
+			return (L.Contains(TEXT("error"), ESearchCase::IgnoreCase) || L.Contains(TEXT("http 4")) || L.Contains(TEXT("http 5")))
+				? TEXT("error")
+				: TEXT("tool");
+		}
+		if (L.StartsWith(TEXT("[user]")))
+		{
+			return TEXT("user");
+		}
+		if (L.StartsWith(TEXT("[assistant]")))
+		{
+			return TEXT("assistant");
+		}
+		return TEXT("default");
+	}
+
+	void UpdateTranscriptRichText(bool bScrollToEnd)
+	{
+		if (!TranscriptRich.IsValid())
+		{
+			return;
+		}
+
+		FString Markup;
+		TArray<FString> Lines;
+		Transcript.ParseIntoArrayLines(Lines, false);
+		for (const FString& Line : Lines)
+		{
+			const FString StyleName = StyleTagForLine(Line);
+			const FString Esc = EscapeRichText(Line);
+			if (StyleName == TEXT("default"))
+			{
+				Markup += Esc + TEXT("\n");
+			}
+			else
+			{
+				Markup += FString::Printf(TEXT("<%s>%s</>\n"), *StyleName, *Esc);
+			}
+		}
+
+		TranscriptRich->SetText(FText::FromString(Markup));
+		if (bScrollToEnd && TranscriptScroll.IsValid())
+		{
+			TranscriptScroll->ScrollToEnd();
+		}
 	}
 
 	FText GetStatusText() const
@@ -1530,7 +1630,7 @@ public:
 			? TEXT("timeout: none")
 			: FString::Printf(TEXT("timeout: %ds"), RequestTimeoutSeconds);
 
-		return FText::FromString(FString::Printf(TEXT("Running… %02d:%02d | model: %s | %s"), Min, Sec, *Model, *TimeoutStr));
+		return FText::FromString(FString::Printf(TEXT("Running... %02d:%02d | model: %s | %s"), Min, Sec, *Model, *TimeoutStr));
 	}
 
 	bool CanStop() const
@@ -1559,10 +1659,7 @@ public:
 		OnStopClicked();
 
 		Transcript.Empty();
-		if (TranscriptBox.IsValid())
-		{
-			TranscriptBox->SetText(FText::GetEmpty());
-		}
+		UpdateTranscriptRichText(/*bScrollToEnd*/ false);
 		if (FConversation* C = GetActiveConversation())
 		{
 			TArray<FAgentMessage> NewMsgs;
@@ -2809,7 +2906,8 @@ private:
 
 	class FUEAgentBridgeModule* Module = nullptr;
 
-	TSharedPtr<SMultiLineEditableTextBox> TranscriptBox;
+	TSharedPtr<SScrollBox> TranscriptScroll;
+	TSharedPtr<SRichTextBlock> TranscriptRich;
 	TSharedPtr<SMultiLineEditableTextBox> InputBox;
 	TSharedPtr<SEditableTextBox> BaseUrlBox;
 	TSharedPtr<SEditableTextBox> ApiKeyBox;
@@ -2828,6 +2926,7 @@ private:
 	TSharedPtr<FString> SelectedModelLabel;
 
 	FString Transcript;
+	TSharedPtr<FSlateStyleSet> TranscriptStyle;
 
 	EUEAgentProvider Provider = EUEAgentProvider::OpenAICompatible;
 	FString BaseUrl;
